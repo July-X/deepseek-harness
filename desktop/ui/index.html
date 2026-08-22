@@ -286,11 +286,11 @@
 
   <div id="progress" class="progress-overlay hidden">
     <div class="progress-body">
-      <div class="spinner" aria-hidden="true"></div>
-      <p id="progressText">正在安装…</p>
+      <p id="progressText" class="visually-hidden">正在安装…</p>
       <div id="installLog" class="install-log hidden">
         <pre id="installLogText"></pre>
       </div>
+      <div class="progress-pulse" aria-hidden="true"></div>
       <div class="btn-row hidden" id="progressActions">
         <button id="btnProgressClose" type="button">
           <svg class="icon"><use href="#i-x" /></svg><span>关闭</span>

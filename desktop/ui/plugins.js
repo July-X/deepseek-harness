@@ -310,7 +310,14 @@ function renderPluginList() {
     const meta = document.createElement('span');
     meta.className = 'plugin-meta';
     const pinNote = row.pinned ? ' · 已锁定版本' : '';
-    meta.textContent = (row.origin === 'npm' ? 'npm' : 'git') + ' · v' + row.installed_version + pinNote;
+    // `installed_version` always carries whatever prefix the source
+    // provides; for git that's usually `v<hash>` or `v<tag>`, for npm
+    // it's plain semver. When a newer release is known, append the
+    // `→ <latest>` arrow so the gap is visible at a glance and the
+    // action-area "有更新" badge stops repeating the prefix.
+    const installed = (row.origin === 'npm' ? 'npm' : 'git') + ' · ' + row.installed_version;
+    const upgrade = row.latest_version ? ' → ' + row.latest_version : '';
+    meta.textContent = installed + upgrade + pinNote;
     info.appendChild(meta);
     item.appendChild(info);
 
@@ -354,7 +361,7 @@ function renderPluginList() {
     if (row.latest_version) {
       const badge = document.createElement('span');
       badge.className = 'badge update';
-      badge.textContent = '有更新 v' + row.latest_version;
+      badge.textContent = '有更新 ' + row.latest_version;
       actions.appendChild(badge);
       if (!row.pinned) {
         const btn = document.createElement('button');

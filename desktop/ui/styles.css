@@ -11,6 +11,9 @@
   --good: #34d399;
   --bad: #f87171;
   --warn: #fbbf24;
+  --whale-eye: #ff2d30;
+  --whale-eye-bright: #ff5a5e;
+  --whale-eye-soft: #ffd9d9;
   --radius: 14px;
 }
 
@@ -546,6 +549,21 @@ button.danger.armed {
   margin: 0;
 }
 
+/* The legacy `progressText` paragraph still lives in the DOM so existing
+   `setProgress(text)` calls keep working without null guards, but it is
+   hidden in favor of the bottom red-eye pulse below. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Failure state: the overlay stays open until the user closes it. */
 #progressActions {
   justify-content: center;
@@ -574,18 +592,63 @@ button.danger.armed {
   word-break: break-all;
 }
 
-.spinner {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  animation: spin 0.8s linear infinite;
+/* Bottom-of-card loading pulse: a red light that sweeps from left to
+   right across a hairline track. Tinted from `assets/whale-icon.svg`'s
+   eye palette (`--whale-eye` outer glow, `--whale-eye-bright` core,
+   `--whale-eye-soft` highlight) so it carries the same brand beat as
+   the desktop icon. Two stacked sweeps with a half-cycle offset keep
+   the pulse continuous rather than a single dash crossing then dead
+   space. */
+.progress-pulse {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 45, 48, 0.08);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 45, 48, 0.06);
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
+.progress-pulse::before,
+.progress-pulse::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 38%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 45, 48, 0.55) 30%,
+    var(--whale-eye-bright) 50%,
+    rgba(255, 45, 48, 0.55) 70%,
+    transparent 100%
+  );
+  filter: blur(0.4px);
+  border-radius: 999px;
+  animation: pulse-sweep 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  box-shadow: 0 0 8px rgba(255, 45, 48, 0.45);
+}
+
+.progress-pulse::after {
+  animation-delay: 1.6s;
+}
+
+@keyframes pulse-sweep {
+  0% {
+    transform: translateX(-120%);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(360%);
+    opacity: 0;
   }
 }
 
