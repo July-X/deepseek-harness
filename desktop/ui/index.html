@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepSeek Harness 桌面端</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <img src="whale-icon.png" alt="" width="32" height="32" />
+      </span>
+      <div>
+        <h1>DeepSeek Harness 桌面端</h1>
+        <p class="subtitle">内核版本管理与本地工作台</p>
+      </div>
+    </div>
+    <div class="status-pill" id="statusPill">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">加载中…</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="row-top">
+    <section class="card" id="cardStatus">
+      <h2>当前内核</h2>
+      <dl class="kv">
+        <dt>运行状态</dt>
+        <dd id="kernelRunning">—</dd>
+        <dt>活动版本</dt>
+        <dd id="kernelActive">—</dd>
+        <dt>工作台地址</dt>
+        <dd id="kernelUrl">—</dd>
+        <dt>Node.js</dt>
+        <dd id="kernelNode">—</dd>
+        <dt>内核数据目录（dsh home）</dt>
+        <dd id="kernelHome">—</dd>
+      </dl>
+      <div class="btn-row">
+        <button id="btnStart" type="button">启动内核</button>
+        <button id="btnStop" type="button">停止内核</button>
+        <button id="btnOpen" type="button">打开工作台</button>
+        <button id="btnLogs" type="button" class="ghost">查看日志</button>
+      </div>
+    </section>
+
+    <section class="card" id="cardSettings">
+      <h2>设置</h2>
+      <div class="btn-row">
+        <button id="btnDetectNode" type="button" class="ghost">自动检测 node</button>
+      </div>
+      <label>
+        Web UI 端口
+        <input id="setPort" type="number" min="1024" max="65535" value="3080" />
+      </label>
+      <label>
+        插件接线 profile 名
+        <input id="setProfile" placeholder="web" spellcheck="false" />
+      </label>
+      <div class="btn-row">
+        <button id="btnSaveSettings" type="button">保存设置</button>
+      </div>
+      <p id="nodeHint" class="muted"></p>
+    </section>
+    </div>
+
+    <section class="card" id="cardUpdates">
+      <div class="card-head">
+        <h2>内核更新</h2>
+        <button id="btnRefresh" type="button" class="ghost">检查更新</button>
+      </div>
+      <div class="updates-body">
+        <div class="updates-info">
+          <p class="muted">
+            根据 npm registry 上的 <code>@deepseek-ai/dsh</code>
+            包（<a href="https://www.npmjs.com/package/@deepseek-ai/dsh">@deepseek-ai/dsh</a>）
+            下载并替换内核。
+          </p>
+          <div id="releaseWarning" class="warning hidden"></div>
+          <h3>当前内核</h3>
+          <dl class="kv">
+            <dt>活动版本</dt>
+            <dd id="updateActive">—</dd>
+            <dt>运行状态</dt>
+            <dd id="updateRunning">—</dd>
+            <dt>已安装版本</dt>
+            <dd id="updateInstalled">—</dd>
+          </dl>
+        </div>
+        <div class="updates-lists">
+          <div class="list-group">
+            <h3>已安装</h3>
+            <div id="installedList" class="installed-list">
+              <p class="muted">尚未安装任何内核。</p>
+            </div>
+          </div>
+          <div class="list-group">
+            <h3>npm 上的发布</h3>
+            <div id="releaseList" class="release-list">
+              <p class="muted">点击「检查更新」从 npm registry 拉取版本列表。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="cardPlugins">
+      <div class="card-head">
+        <h2>插件管理</h2>
+        <span id="pluginUpdateBadge" class="badge hidden"></span>
+        <button id="btnPluginCheck" type="button" class="ghost">检查更新</button>
+      </div>
+      <p class="muted">
+        社区插件统一存放在 <code>~/.dsh/plugins/</code>，以<strong>链接</strong>或<strong>复制</strong>的方式进入每个内核，
+        切换内核无需重新安装。安装来源支持 npm 包名（含
+        <code>@scope</code>）与 GitHub 仓库 URL（<code>#tag</code> 可锁定版本）。
+        浏览入口：<a href="https://github.com/topics/dsh-plugin">dsh-plugin</a>。
+      </p>
+      <div id="pluginWarning" class="warning hidden"></div>
+      <h3>已安装</h3>
+      <div id="pluginList" class="installed-list">
+        <p class="muted">尚未安装任何插件。</p>
+      </div>
+      <h3>安装插件</h3>
+      <div class="install-row">
+        <input id="pluginSpec" placeholder="npm 包名（@scope/name）或 GitHub 仓库 URL" spellcheck="false" />
+        <select id="pluginMode" title="物化模式">
+          <option value="link">链接模式（默认）</option>
+          <option value="copy">复制模式</option>
+        </select>
+        <button id="btnPluginInstall" type="button">安装</button>
+      </div>
+      <div class="btn-row">
+        <button id="btnPluginSync" type="button" class="ghost">同步到所有内核</button>
+      </div>
+      <h3>社区目录</h3>
+      <div class="install-row">
+        <input id="catalogQuery" placeholder="按名称/描述搜索社区插件，如 skin / skill / memory" spellcheck="false" />
+        <button id="btnCatalogSearch" type="button" class="ghost">搜索</button>
+      </div>
+      <div id="catalogList" class="release-list">
+        <p class="muted">输入关键词搜索社区目录（数据来自 losebird/dsh-plugin-market）。</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <div id="progress" class="progress-overlay hidden">
+    <div class="progress-body">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="progressText">正在安装…</p>
+      <div id="installLog" class="install-log hidden">
+        <pre id="installLogText"></pre>
+      </div>
+      <div class="btn-row hidden" id="progressActions">
+        <button id="btnProgressClose" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="logModal" class="modal hidden">
+    <div class="modal-body">
+      <div class="modal-head">
+        <h2>内核日志</h2>
+        <button id="btnLogClose" type="button" class="ghost">关闭</button>
+      </div>
+      <pre id="logContent"></pre>
+    </div>
+  </div>
+
+  <script src="app.js" defer></script>
+  <script src="plugins.js" defer></script>
+</body>
+</html>
