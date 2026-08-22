@@ -507,6 +507,48 @@ fn latest_tag<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
     .max_by(|a, b| cmp_versions(a, b))
 }
 
+/// Whether a stored version string looks like semver (e.g. `v0.15.0`,
+/// `1.2.3-rc.1`) rather than a git short hash (e.g. `v646c91c`).
+///
+/// Used by `is_newer_than` to detect the rare fallback path where an
+/// unpinned git-origin repo has no usable semver tags: in that case
+/// `installed_version` is the cloned HEAD short hash, and `cmp_versions`
+/// would rank any semver tag ahead of it purely on numeric-segment
+/// count. Filtering on shape first lets `is_newer_than` choose the
+/// right comparison instead of trusting that ordering.
+fn looks_like_semver(version: &str) -> bool {
+    let stripped = version.strip_prefix('v').unwrap_or(version);
+    let head = stripped.split_once('-').map(|(h, _)| h).unwrap_or(stripped);
+    let parts: Vec<&str> = head.split('.').collect();
+    parts.len() >= 2 && parts[..2].iter().all(|seg| seg.parse::<u64>().is_ok())
+}
+
+/// Whether the candidate `latest` is newer than the currently installed
+/// `installed` for a plugin of the given origin.
+///
+/// - npm / pinned git: rank by `cmp_versions` against a semver baseline.
+/// - unpinned git with a tag-shaped installed version (the common case
+///   after `fetch_git` resolves the highest semver tag): same semver
+///   rank.
+/// - unpinned git with a hash-shaped installed version (the fallback
+///   path for repos without any semver tags): `cmp_versions` would
+///   rank the remote's tag-shaped `latest` ahead purely on numeric
+///   segment count, so fall back to string equality — but only when
+///   `latest` is also a hash. A tag against a hash means the remote
+///   has no commit-graph signal to compare against, so report no
+///   update until the user manually re-installs.
+fn is_newer_than(latest: &str, installed: &str, origin: &str, pinned: bool) -> bool {
+    if origin == "git" && !pinned && !looks_like_semver(installed) {
+        if looks_like_semver(latest) {
+            false
+        } else {
+            latest != installed
+        }
+    } else {
+        cmp_versions(latest, installed) == Ordering::Greater
+    }
+}
+
 // --- fetching ---------------------------------------------------------------
 
 /// Run one command, collecting stdout for quick helpers (git ls-remote).
@@ -697,10 +739,30 @@ fn fetch_git(
             "未找到 git（git 来源的插件需要 git；请先安装 git）".into(),
         ));
     }
+
+    // Resolve what to check out.
+    // - pinned: the spec supplies `#tag`; use it directly.
+    // - unpinned: pick the highest semver tag the remote has published,
+    //   so the installed_version stored on disk is the same kind of
+    //   string `check_updates` will compare against. A repo without any
+    //   semver tag falls back to the default branch (HEAD short hash);
+    //   `is_newer_than` handles that fallback specially so a fresh tag
+    //   does not look "newer" than the hash on segment count alone.
+    let branch = match spec.pin.as_ref() {
+        Some(tag) => Some(tag.clone()),
+        None => match git_latest_tag(&spec.source) {
+            Ok(Some(tag)) => Some(tag),
+            Ok(None) => None,
+            Err(e) => {
+                return Err(AppError::Plugin(format!("查询最新 tag 失败：{e}")));
+            }
+        },
+    };
+
     on_progress(&format!("正在克隆 {}", spec.source));
     let mut cmd = Command::new("git");
     cmd.arg("clone").arg("--depth").arg("1");
-    if let Some(tag) = &spec.pin {
+    if let Some(tag) = &branch {
         cmd.arg("--branch").arg(tag);
     }
     let status = quiet(&mut cmd)
@@ -717,9 +779,12 @@ fn fetch_git(
         )));
     }
     build_git_plugin(dest, pnpm_exe, on_progress)?;
-    if let Some(tag) = &spec.pin {
-        return Ok(tag.clone());
+    if let Some(tag) = branch {
+        return Ok(tag);
     }
+    // Unpinned repo without any semver tags: cloned the default branch;
+    // record the HEAD hash so the source marker still names something
+    // stable and the user can see what commit they have.
     let dest_str = dest.to_str().unwrap_or("");
     let (ok, out) = run_capture("git", &["-C", dest_str, "rev-parse", "--short", "HEAD"])
         .map_err(|e| AppError::Io(e.to_string()))?;
@@ -771,6 +836,13 @@ fn build_git_plugin(
         "--ignore-workspace",
         "--config.node-linker=hoisted",
         "--reporter=append-only",
+        // pnpm 11+ refuses to silently skip a transitive dependency's
+        // build script: `ERR_PNPM_IGNORED_BUILDS` turns into a non-zero
+        // exit code even when the parent `prepare` ran fine and emitted
+        // `lib/`. Plugins commonly pull in something like `node-pty`
+        // whose native compile we don't actually need here — the
+        // project's own `tsdown` step has already produced the entry.
+        "--config.strict-dep-builds=false",
         "--config.enable-pre-post-scripts=true",
     ];
     // pnpm runs the package's `prepare` lifecycle script automatically after
@@ -902,6 +974,10 @@ fn install_store_deps(
         "--ignore-workspace",
         "--config.node-linker=hoisted",
         "--reporter=append-only",
+        // See `build_git_plugin`: pnpm 11+'s default ignored-builds
+        // accounting turns into exit code 1 here too, even when the
+        // node_modules tree is fine.
+        "--config.strict-dep-builds=false",
     ];
     let status =
         kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut *on_progress).map_err(|e| {
@@ -1155,12 +1231,12 @@ fn ensure_profile(data_dir: &Path, profile: &str) -> Result<(), AppError> {
     let workspace = dir.join("pnpm-workspace.yaml");
     let needs_workspace = !workspace.exists()
         || fs::read_to_string(&workspace)
-            .map(|t| !t.contains("minimumReleaseAge=0"))
+            .map(|t| !t.contains("minimumReleaseAge: 0"))
             .unwrap_or(false);
     if needs_workspace {
         let _ = fs::write(
             &workspace,
-            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\nminimumReleaseAge=0\n",
+            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\nminimumReleaseAge: 0\n",
         );
     }
     Ok(())
@@ -1241,7 +1317,16 @@ pub fn ensure_wiring(
     let log_path = wiring_log_path(data_dir);
     let status = kernel::run_pnpm(
         pnpm_exe,
-        &["install", "--reporter=append-only"],
+        // See `build_git_plugin`: pnpm 11+'s default ignored-builds
+        // accounting turns into exit code 1 even when resolution is
+        // healthy. The profile's install only needs a usable
+        // node_modules, which the existing fallback already tolerates
+        // when wiring is unchanged, so silence the false positive here.
+        &[
+            "install",
+            "--reporter=append-only",
+            "--config.strict-dep-builds=false",
+        ],
         &profile,
         &log_path,
         on_progress,
@@ -1309,7 +1394,7 @@ pub fn check_updates(data_dir: &Path) -> Result<Vec<UpdateInfo>, AppError> {
             _ => (None, None),
         };
         let newer =
-            latest.filter(|v| cmp_versions(v, &item.installed_version) == Ordering::Greater);
+            latest.filter(|v| is_newer_than(v, &item.installed_version, &item.origin, item.pinned));
         item.latest_version = newer.clone();
         out.push(UpdateInfo {
             id: item.id.clone(),
@@ -1322,12 +1407,27 @@ pub fn check_updates(data_dir: &Path) -> Result<Vec<UpdateInfo>, AppError> {
     Ok(out)
 }
 
-/// Latest version of a git-origin plugin: the newest semver-ish tag; None
-/// when the remote has no usable tags (branch-tracked plugins then stay on
-/// their checked-out head).
+/// Latest version of a git-origin plugin: the highest semver tag the
+/// remote has published. `fetch_git` aligns `installed_version` with
+/// the same shape (a tag, or the HEAD hash as a fallback), so
+/// `is_newer_than` can compare them directly.
+///
+/// The unpinned branch tracks the highest tag rather than the branch
+/// HEAD — a developer who pushed new commits but has not cut a release
+/// yet will not look "newer" than the user's last install. Plugin
+/// authors publish releases via tags; that is what the user wants
+/// notified about.
 fn git_latest(item: &StoreItem) -> Result<Option<String>, String> {
+    git_latest_tag(&item.source)
+}
+
+/// Highest semver tag the remote has published, used by `fetch_git`
+/// (to pick the branch when the source is unpinned) and by `git_latest`
+/// (to compare against the installed version). Returns None when the
+/// remote has no usable tags.
+fn git_latest_tag(source: &str) -> Result<Option<String>, String> {
     let (ok, out) =
-        run_capture("git", &["ls-remote", "--tags", &item.source]).map_err(|e| e.to_string())?;
+        run_capture("git", &["ls-remote", "--tags", source]).map_err(|e| e.to_string())?;
     if !ok {
         return Ok(None);
     }
@@ -1729,12 +1829,12 @@ pub fn update(
         ensure_store_npmrc(data_dir).ok();
         install_store_deps(data_dir, pnpm_exe, &updated.id, on_progress)?;
     }
-    // Sync latest_version to what we just installed so the UI badge clears
-    // immediately.  Without this, the previous check_updates result lingers
-    // (and for unpinned git-origin plugins `installed_version` becomes the
-    // HEAD short hash while `latest_version` stays a semver tag, so the
-    // version compare spuriously reports "newer").  A later check_updates can
-    // still raise latest_version if the registry has moved on since then.
+    // Sync latest_version to what we just installed so the UI badge
+    // clears immediately after a successful update. Without this, the
+    // previous `check_updates` result lingers and the badge keeps
+    // reporting the same phantom "newer version" the user just
+    // installed. A later `check_updates` can still raise `latest_version`
+    // when the remote has moved on since this fetch.
     updated.latest_version = Some(updated.installed_version.clone());
     upsert_item(data_dir, updated.clone())?;
     sync_kernels(data_dir, &updated)?;
@@ -1848,7 +1948,7 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
         if item
             .latest_version
             .as_deref()
-            .map(|l| cmp_versions(l, &item.installed_version) == Ordering::Greater)
+            .map(|l| is_newer_than(l, &item.installed_version, &item.origin, item.pinned))
             .unwrap_or(false)
         {
             updates += 1;
@@ -2098,6 +2198,43 @@ mod tests {
             Some("1.10.0")
         );
         assert_eq!(latest_tag(["not-a-version"].iter().copied()), None);
+    }
+
+    #[test]
+    fn detects_semver_shape() {
+        // Two numeric segments is the bar the tag filter and update
+        // comparator both rely on; everything else is treated as a hash.
+        assert!(looks_like_semver("v0.15.0"));
+        assert!(looks_like_semver("0.15.0"));
+        assert!(looks_like_semver("1.2.3-rc.1"));
+        assert!(!looks_like_semver("v646c91c"));
+        assert!(!looks_like_semver("head"));
+        assert!(!looks_like_semver("1"));
+        assert!(!looks_like_semver(""));
+    }
+
+    #[test]
+    fn newer_than_handles_hash_vs_semver() {
+        // npm / pinned git keep the semver ranking. The unpinned git
+        // branch now also stores the highest remote tag (via
+        // `fetch_git`), so it joins the same semver ranking path.
+        assert!(is_newer_than("v0.15.0", "v0.14.0", "npm", false));
+        assert!(!is_newer_than("v0.14.0", "v0.15.0", "npm", false));
+        assert!(is_newer_than("v1.0.0", "v0.15.0", "git", true));
+        assert!(is_newer_than("v0.16.0", "v0.15.0", "git", false));
+        assert!(!is_newer_than("v0.15.0", "v0.15.0", "git", false));
+
+        // Fallback path: unpinned git-origin whose repo has no usable
+        // semver tags records `installed_version` as the HEAD short
+        // hash. The remote `latest` is a tag, so a plain semver compare
+        // would say Greater purely on segment count. Use string equality
+        // instead so a fresh tag does not look "newer" forever after.
+        assert!(!is_newer_than("v0.15.0", "v646c91c", "git", false));
+        assert!(is_newer_than("vNEW1", "v646c91c", "git", false));
+        assert!(!is_newer_than("v646c91c", "v646c91c", "git", false));
+        // Pinned with a hash-shaped latest never reaches the special
+        // branch; cmp_versions ranks the hash below any semver tag.
+        assert!(is_newer_than("v0.15.0", "v646c91c", "git", true));
     }
 
     #[test]
