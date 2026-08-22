@@ -163,7 +163,10 @@ pub fn fetch_releases() -> Result<releases::ReleaseList, String> {
     releases::list_releases().map_err(|e| e.to_string())
 }
 
-pub fn promise_pnpm(data_dir: &Path) -> Result<(PathBuf, PathBuf, node::NodeInfo), String> {
+pub fn promise_pnpm(
+    data_dir: &Path,
+    mut on_progress: impl FnMut(&str),
+) -> Result<(PathBuf, PathBuf, node::NodeInfo), String> {
     let s = settings::load(data_dir);
     let node_info = node::resolve(&s);
     if !node_info.ok {
@@ -173,10 +176,16 @@ pub fn promise_pnpm(data_dir: &Path) -> Result<(PathBuf, PathBuf, node::NodeInfo
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let pnpm = node::resolve_pnpm(&s, &node_dir).ok_or_else(|| {
-        "未找到 pnpm（安装 Node.js 后执行 `npm install -g pnpm`，或在设置中指定 pnpm 路径）"
-            .to_string()
-    })?;
+    // The auto-install log lives under the shell's log dir next to the
+    // install logs; rotation reuses the existing kernel::logs_dir helper.
+    let pnpm_log = kernel::logs_dir(data_dir).join(format!(
+        "pnpm-install-{}.log",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    ));
+    let pnpm = node::ensure_pnpm(&s, &node_dir, &pnpm_log, &mut on_progress)?;
     Ok((PathBuf::from(node_info.path.clone()), pnpm, node_info))
 }
 
@@ -190,7 +199,9 @@ pub async fn install_kernel(
     on_event: Channel<String>,
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
-    let (node_path, pnpm_exe, _node_info) = promise_pnpm(&data_dir)?;
+    let (node_path, pnpm_exe, _node_info) = promise_pnpm(&data_dir, |msg| {
+        let _ = on_event.send(msg.to_string());
+    })?;
     // Clone the values the closure needs so we still own `data_dir` and
     // `version` for the post-install `set_active` / auto-start steps.
     let dir_for_thread = data_dir.clone();
@@ -348,8 +359,11 @@ pub async fn plugin_install(
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
     let settings = settings::load(&data_dir);
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir)?;
-    let send = on_event;
+    let send = on_event.clone();
+    let promise_send = send.clone();
+    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
+        let _ = promise_send.send(msg.to_string());
+    })?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut progress = |msg: &str| {
             let _ = send.send(msg.to_string());
@@ -371,8 +385,11 @@ pub async fn plugin_update(
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
     let settings = settings::load(&data_dir);
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir)?;
-    let send = on_event;
+    let send = on_event.clone();
+    let promise_send = send.clone();
+    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
+        let _ = promise_send.send(msg.to_string());
+    })?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut progress = |msg: &str| {
             let _ = send.send(msg.to_string());
@@ -394,8 +411,11 @@ pub async fn plugin_uninstall(
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
     let settings = settings::load(&data_dir);
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir)?;
-    let send = on_event;
+    let send = on_event.clone();
+    let promise_send = send.clone();
+    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
+        let _ = promise_send.send(msg.to_string());
+    })?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut progress = |msg: &str| {
             let _ = send.send(msg.to_string());
@@ -415,8 +435,11 @@ pub async fn plugin_sync(
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
     let settings = settings::load(&data_dir);
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir)?;
-    let send = on_event;
+    let send = on_event.clone();
+    let promise_send = send.clone();
+    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
+        let _ = promise_send.send(msg.to_string());
+    })?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut progress = |msg: &str| {
             let _ = send.send(msg.to_string());
@@ -438,8 +461,11 @@ pub async fn plugin_set_mode(
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
     let settings = settings::load(&data_dir);
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir)?;
-    let send = on_event;
+    let send = on_event.clone();
+    let promise_send = send.clone();
+    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
+        let _ = promise_send.send(msg.to_string());
+    })?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut progress = |msg: &str| {
             let _ = send.send(msg.to_string());

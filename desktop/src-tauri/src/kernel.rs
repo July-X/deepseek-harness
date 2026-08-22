@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::process::quiet;
+use crate::process::{quiet, run_with_progress};
 
 use serde::Serialize;
 use tauri::Manager;
@@ -330,101 +330,18 @@ pub fn install_version(
 }
 
 /// Spawn pnpm once with the given args, piping merged stdout+stderr line by
-/// line to both `log_path` and `on_progress`.
-///
-/// `.cmd` files cannot be spawned directly on Windows, so they are routed
-/// through the command shell there; everywhere else the pnpm script runs
-/// directly. Each output stream is drained on its own thread so a full OS
-/// pipe buffer can never deadlock the other stream; the lines travel over a
-/// channel back to this thread, which is the only caller of `on_progress`.
+/// line to both `log_path` and `on_progress`. Thin wrapper over the shared
+/// `run_with_progress` helper, which already handles the Windows `.cmd`
+/// routing, dual-stream drain, and silent-period heartbeat that pnpm
+/// installs need to surface to the UI.
 pub(crate) fn run_pnpm(
     pnpm_exe: &Path,
     args: &[&str],
     cwd: &Path,
     log_path: &Path,
-    mut on_progress: impl FnMut(&str),
+    on_progress: impl FnMut(&str),
 ) -> io::Result<std::process::ExitStatus> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::sync::mpsc;
-
-    let mut log = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(log_path)?;
-
-    #[cfg(windows)]
-    let mut child = {
-        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
-        let mut cmd = Command::new(comspec);
-        cmd.arg("/C").arg(pnpm_exe).args(args);
-        // pnpm install resolves the nearest package.json upward from cwd: a
-        // GUI shell starts with an arbitrary cwd, so it must be set
-        // explicitly or the install lands in the wrong directory.
-        cmd.current_dir(cwd);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        quiet(&mut cmd).spawn()?
-    };
-    #[cfg(not(windows))]
-    let mut child = {
-        let mut cmd = Command::new(pnpm_exe);
-        cmd.args(args);
-        cmd.current_dir(cwd);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.spawn()?
-    };
-
-    let stdout = child.stdout.take().expect("pnpm stdout was piped");
-    let stderr = child.stderr.take().expect("pnpm stderr was piped");
-
-    // One drain thread per stream; both feed the same channel. The receiver
-    // loop below ends once both senders are dropped (streams closed).
-    let (tx, rx) = mpsc::channel::<String>();
-    let tx_err = tx.clone();
-    let drain_stdout = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let drain_stderr = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            let Ok(line) = line else { break };
-            if tx_err.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    // pnpm can stay silent for tens of seconds while resolving the
-    // dependency graph; a heartbeat keeps the user informed that the
-    // install is still alive. `recv_timeout` wakes on every real line and
-    // emits the elapsed-time message only after HEARTBEAT_SECS of silence.
-    const HEARTBEAT_SECS: u64 = 10;
-    let started = std::time::Instant::now();
-    loop {
-        match rx.recv_timeout(Duration::from_secs(HEARTBEAT_SECS)) {
-            Ok(line) => {
-                on_progress(line.trim_end());
-                let _ = writeln!(log, "{line}");
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let secs = started.elapsed().as_secs();
-                on_progress(&format!(
-                    "… 安装仍在进行（已进行 {secs} 秒，pnpm 正在解析依赖或下载）"
-                ));
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
-    // The channel is closed by now, so both drains have finished their loops.
-    let _ = drain_stdout.join();
-    let _ = drain_stderr.join();
-
-    child.wait()
+    run_with_progress(pnpm_exe, args, cwd, log_path, on_progress)
 }
 
 /// Whether something is already listening on `127.0.0.1:port`.
