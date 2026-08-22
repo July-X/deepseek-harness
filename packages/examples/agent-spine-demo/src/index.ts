@@ -100,6 +100,8 @@ export interface Config {
   includeRuntimeContext?: SystemPromptConfig['includeRuntimeContext']
   /** The deployment persona (see dsh-system-prompt's `Config`). */
   persona?: SystemPromptConfig['persona']
+  /** The language the agent must think and reply in (see dsh-system-prompt's `Config`). */
+  responseLanguage?: SystemPromptConfig['responseLanguage']
   /** The explicit model-facing tool order (see dsh-system-prompt's `Config`). */
   toolOrder?: SystemPromptConfig['toolOrder']
   /** The tool registry's config — its presentation `mode` (see dsh-tools' `Config`). */
@@ -185,6 +187,7 @@ export function pickSpineConfig(config: Omit<Config, 'agents'>): Omit<Config, 'a
     ...config.includeHarnessIdentity !== undefined ? { includeHarnessIdentity: config.includeHarnessIdentity } : {},
     ...config.includeRuntimeContext !== undefined ? { includeRuntimeContext: config.includeRuntimeContext } : {},
     ...config.persona !== undefined ? { persona: config.persona } : {},
+    ...config.responseLanguage !== undefined ? { responseLanguage: config.responseLanguage } : {},
     ...config.toolOrder !== undefined ? { toolOrder: config.toolOrder } : {},
     ...config.tools !== undefined ? { tools: config.tools } : {},
     ...config.dshHome !== undefined ? { dshHome: config.dshHome } : {},
@@ -226,6 +229,7 @@ export function apply(ctx: Context, config: Config): void {
     includeHarnessIdentity: config.includeHarnessIdentity ?? true,
     includeRuntimeContext: config.includeRuntimeContext ?? true,
     persona: config.persona ?? '',
+    ...config.responseLanguage !== undefined ? { responseLanguage: config.responseLanguage } : {},
     ...config.toolOrder !== undefined ? { toolOrder: config.toolOrder } : {},
   })
   ctx.plugin(ToolRuntime, config.tools ?? {})

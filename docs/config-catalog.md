@@ -241,6 +241,8 @@ export interface Config {
   includeRuntimeContext?: SystemPromptConfig['includeRuntimeContext']
   /** The deployment persona (see dsh-system-prompt's `Config`). */
   persona?: SystemPromptConfig['persona']
+  /** The language the agent must think and reply in (see dsh-system-prompt's `Config`). */
+  responseLanguage?: SystemPromptConfig['responseLanguage']
   /** The explicit model-facing tool order (see dsh-system-prompt's `Config`). */
   toolOrder?: SystemPromptConfig['toolOrder']
   /** The tool registry's config — its presentation `mode` (see dsh-tools' `Config`). */
@@ -2400,6 +2402,12 @@ export interface Config {
    */
   persona?: string
   /**
+   * The language the agent must think and reply in, reasoning steps included.
+   * Empty (the default) renders no language instruction; the base bundle
+   * defaults it to the product language and deployments override per profile.
+   */
+  responseLanguage?: string
+  /**
    * Model-facing tool names in order, with {@link TOOL_ORDER_REST} exactly once.
    * Invalid fields fail at load and unknown names fail at assembly; known names
    * hidden in one scope may be absent there. Omitted means lexicographic order.
@@ -2408,7 +2416,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/core/system-prompt/src/index.ts:186`](../packages/core/system-prompt/src/index.ts)
+Source: [`packages/core/system-prompt/src/index.ts:192`](../packages/core/system-prompt/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 

@@ -11,6 +11,7 @@ System prompt assembly registry. Plugins contribute ordered sections, tool schem
 | `includeHarnessIdentity` | `true` | Include the fixed `You are an AI agent powered by DeepSeek Harness.` order-−100 opener. Set false only when a compatibility deployment owns the complete system prompt. |
 | `includeRuntimeContext` | `true` | Include ordered dynamic contexts in assembly. When false, context providers are not evaluated and contexts added by `system-prompt/assemble` listeners are discarded after the waterfall; other services and their enforcement remain active. |
 | `persona` | `''` | The global deployment-persona default: the ONE config-authored prompt fragment, rendered as the order-0 `deployment:persona` section unless an agent-scoped contribution shadows it. A template — complete `{{…}}` groups are interpreted strictly against the registered variables (the shipped loop registers `{{model}}`/`{{cwd}}`), with no escape syntax for literal braces yet. Empty ⇒ the section is dropped at render. |
+| `responseLanguage` | `''` | The language the agent must think and reply in — reasoning steps included — rendered as the fixed order-−98 `harness:language` section between identity and persona. Empty ⇒ no language instruction (the model follows the prompt's own language). The base bundle defaults it to the product language (`简体中文`); a deployment with another UI language overrides it per profile. |
 | `toolOrder` | — | Explicit model-facing tool order, as a list of `ToolSchema.name`s with one `'<unlisted-tools>'` rest entry (`TOOL_ORDER_REST`): listed tools take their listed position, unlisted tools land at the rest entry in lexicographic name order. Absent ⇒ plain lexicographic name order. Applied to the collected tools BEFORE the `system-prompt/assemble` waterfall — like the sections' `order` sort, it canonicalizes what the registry contributed (registration order is a plugin-load artifact), and a waterfall listener that mutates the list owns the determinism of what it emits. Misconfiguration fails loud: a list without exactly one rest entry, or with duplicates, throws at load; a listed name with no registered tool rejects every `assemble()`; a tool provider returning the reserved rest-entry name also rejects. Under the shipped loop the turn fails before any model request. Why a central list and not per-plugin weights: [Explicit model-facing tool order](../../../.agents/notes/implemented/feature/2026-07-06-explicit-tool-order.md). |
 
 ## Service: `SystemPrompt` (ctx key: `systemPrompt`)
@@ -39,7 +40,7 @@ Merge-extensible: plugins can declare extra fields on `PromptAssembly` and `Asse
 
 ### Extension points
 
-- Section providers: tool packages own their cross-call guidance (`tool:bash`, `tool:read`, …); this plugin owns `harness:identity` and `deployment:persona`.
+- Section providers: tool packages own their cross-call guidance (`tool:bash`, `tool:read`, …); this plugin owns `harness:identity`, the config-driven `harness:language`, and `deployment:persona`.
 - Variable providers: the agent loop registers `model` and `cwd`; any plugin can register the facts it owns (a future `date`, git state, …).
 - Tool schema providers: `ToolRuntime` registers itself as a tool provider automatically.
 - The [`system-prompt/assemble` waterfall](#live-events): cooperatively mutate or replace the assembly per caller before any complete-section constraint is enforced.
@@ -54,6 +55,8 @@ Design rationale: [the prompt-variables Agent Note](../../../.agents/notes/imple
 
 By default every assembly starts with the harness identity below, then the configured persona and ordered plugin sections after strict variable interpolation. `includeHarnessIdentity: false` omits only that fixed opener. Empty sections disappear; scoped sections and variables can shadow globals for one agent. The `system-prompt/assemble` waterfall determines the delivered prompt and tool schemas unless one effective section declares itself complete; that exact section then becomes the whole system prompt while the waterfall's contexts, tools, and variables remain. Ordered dynamic contexts are separate from system-prompt sections and become sourced user-role snapshots only when present. `includeRuntimeContext: false` or a scoped suppressor removes all such contexts, including listener additions, without disabling the services that own the underlying policy or state.
 
+When `responseLanguage` is set, a fixed order-−98 `harness:language` section joins the assembly between identity and persona: the model is instructed to think and reply in that language, reasoning steps included.
+
 ##### Harness identity
 
 ```markdown
@@ -62,7 +65,7 @@ You are an AI agent powered by DeepSeek Harness.
 
 #### Token effect
 
-Identity is a fixed per-request cost when enabled. Persona and plugin text are repeated per request and scale with their rendered content.
+Identity is a fixed per-request cost when enabled. A configured language section adds its one fixed sentence to every request. Persona and plugin text are repeated per request and scale with their rendered content.
 
 #### KV Cache effect
 

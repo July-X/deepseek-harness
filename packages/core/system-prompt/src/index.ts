@@ -130,6 +130,12 @@ export const PERSONA_SECTION = 'deployment:persona'
 /** Prompt order of the persona slot; the first section a model reads. */
 export const PERSONA_ORDER = 0
 
+/** The response-language section's name, registered only when configured. */
+export const LANGUAGE_SECTION = 'harness:language'
+
+/** Prompt order of the language slot: after the identity opener (-100), before the persona (0). */
+export const LANGUAGE_ORDER = -98
+
 /** Valid variable names: how they are written between the braces. */
 const VARIABLE_NAME = /^[a-z][a-z0-9_]*$/
 
@@ -193,6 +199,12 @@ export interface Config {
    * `deployment:persona` shadows it; `{{variable}}` references are strict.
    */
   persona?: string
+  /**
+   * The language the agent must think and reply in, reasoning steps included.
+   * Empty (the default) renders no language instruction; the base bundle
+   * defaults it to the product language and deployments override per profile.
+   */
+  responseLanguage?: string
   /**
    * Model-facing tool names in order, with {@link TOOL_ORDER_REST} exactly once.
    * Invalid fields fail at load and unknown names fail at assembly; known names
@@ -340,6 +352,8 @@ export class SystemPrompt extends Service {
     includeHarnessIdentity: z.boolean().default(true),
     includeRuntimeContext: z.boolean().default(true),
     persona: z.string().default(''),
+    // The language the model must think and reply in; empty disables the section.
+    responseLanguage: z.string().default(''),
     // Preserve omission because an explicit empty order lacks the rest marker.
     toolOrder: z.array(z.string()).default(undefined as unknown as string[]),
   })
@@ -359,6 +373,15 @@ export class SystemPrompt extends Service {
         name: 'harness:identity',
         order: -100,
         text: 'You are an AI agent powered by DeepSeek Harness.',
+      })
+    }
+    // A configured response language pins the model's thinking and reply
+    // language (reasoning steps included); empty renders nothing.
+    if (config.responseLanguage) {
+      this.section({
+        name: LANGUAGE_SECTION,
+        order: LANGUAGE_ORDER,
+        text: `Think and reply in ${config.responseLanguage}. Write every reasoning and thinking step in ${config.responseLanguage} as well.`,
       })
     }
     this.section({

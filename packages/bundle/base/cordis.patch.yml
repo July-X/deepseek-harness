@@ -424,12 +424,15 @@
     - id: tools
       name: '@deepseek-ai/dsh-tools'
 
-    # The deployment persona is a deployment choice; plan-mode and tool plugins own
-    # their own prompt sections.
+    # The deployment persona and the model's response language are deployment
+    # choices; plan-mode and tool plugins own their own prompt sections. The
+    # product default is Simplified Chinese, matching the shipped UI; a profile
+    # with another UI language overrides this whole row (patches replace rows).
     - id: system-prompt
       name: '@deepseek-ai/dsh-system-prompt'
       config:
         persona: ''
+        responseLanguage: 简体中文
 
     # Agents created at startup. The base stays empty; raw overlays may create
     # agents, while Web creates sessions on client request.

@@ -37,6 +37,29 @@ describe('SystemPrompt', () => {
       expect(renderPrompt(await ctx.systemPrompt.assemble())).toBe(IDENTITY)
     })
 
+    it('registers a configured response-language instruction between identity and persona', async () => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt, { responseLanguage: '简体中文' })
+
+      const assembly = await ctx.systemPrompt.assemble()
+      expect(assembly.sections.map(section => section.name)).toEqual([
+        'harness:identity',
+        'harness:language',
+        'deployment:persona',
+      ])
+      expect(renderPrompt(assembly)).toBe(
+        `${IDENTITY}\n\nThink and reply in 简体中文. Write every reasoning and thinking step in 简体中文 as well.`,
+      )
+    })
+
+    it('renders no language section when responseLanguage is unset (default)', async () => {
+      const ctx = new Context()
+      await ctx.plugin(SystemPrompt)
+      const assembly = await ctx.systemPrompt.assemble()
+      expect(assembly.sections.map(section => section.name)).not.toContain('harness:language')
+      expect(renderPrompt(assembly)).toBe(IDENTITY)
+    })
+
     it('can omit the harness identity for a deployment that owns the complete persona', async () => {
       const ctx = new Context()
       await ctx.plugin(SystemPrompt, {
