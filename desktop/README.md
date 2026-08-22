@@ -80,24 +80,26 @@ desktop/
 
 ## 本地构建
 
-前提：Rust 工具链（含 `cargo`）、Node.js 22+、pnpm；macOS 构建 Intel 目标见下方 `build:mac-intel`。
+前提：Rust 工具链（含 `cargo`）、Node.js 22+；`scripts/install.mjs` 会自动检测 pnpm，缺失时回退到 npm。
 
 ```sh
 cd desktop
 
-# 安装 Tauri CLI（--ignore-workspace 必需：防止向上匹配仓库根的 pnpm-workspace.yaml）
-pnpm install --ignore-workspace
+# 安装 Tauri CLI（自动检测 pnpm，缺失时回退到 npm；带 --ignore-workspace 防向上匹配根 pnpm-workspace.yaml）
+npm run deps
 
-# 开发运行（需先安装内核，见“使用”）
-pnpm run dev
+# 开发运行（需先安装内核，见「使用」）
+npm run dev
 
 # 本机当前架构构建
-pnpm run build
+npm run build
 
 # 指定目标平台
-pnpm run build:mac-intel   # x86_64-apple-darwin（Intel Mac）
-pnpm run build:win         # x86_64-pc-windows-msvc
+npm run build:mac-intel   # x86_64-apple-darwin（Intel Mac）
+npm run build:win         # x86_64-pc-windows-msvc
 ```
+
+> 想直接走 pnpm / npm 也行：`pnpm install --ignore-workspace` 或 `npm install --ignore-workspace` 同样有效；wrapper 只是省略记忆参数。
 
 产物位于 `src-tauri/target/release/bundle/`（macOS 为 `.dmg`，Windows 为 NSIS 安装包 `.exe`）。
 

@@ -11,13 +11,15 @@
 ## 命令
 
 ```sh
-pnpm install --ignore-workspace   # 安装 @tauri-apps/cli（--ignore-workspace 必需，见上）
-pnpm run dev                      # tauri dev
-pnpm run build                    # 本机构建（.dmg / NSIS）
+npm run deps                      # 安装 @tauri-apps/cli（自动检测 pnpm，缺失时回退到 npm；带 --ignore-workspace 防向上匹配根 pnpm-workspace.yaml）
+npm run dev                       # tauri dev
+npm run build                     # 本机构建（.dmg / NSIS）
 cargo check                       # 在 src-tauri/ 内：快速编译检查
 cargo clippy --all-targets        # lint，零警告基线
 cargo fmt                         # rustfmt 格式化
 ```
+
+> 仍可直接跑 `pnpm install --ignore-workspace` / `npm install --ignore-workspace` —— `scripts/install.mjs` 只在不想记 `--ignore-workspace` 或包管理器切换时使用。
 
 - UI 是零构建静态页面（`ui/index.html` + `app.js` + `styles.css`），无打包步骤；改完直接生效。JS 语法可用 `node --check ui/app.js` 快速验证。
 - Rust 改动至少跑 `cargo check`；提交前跑 `cargo clippy --all-targets && cargo fmt`。
