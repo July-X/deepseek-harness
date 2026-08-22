@@ -53,14 +53,16 @@ desktop/
 │   ├── index.html
 │   ├── styles.css
 │   ├── plugins.js            # 插件管理卡片（安装/更新/目录搜索/更新提醒）
-│   ├── whale-icon.png        # 顶栏 logo（黑鲸 + 红眼，透明底；源自 assets/whale-icon.svg）
+│   ├── whale-icon.png        # 顶栏 logo（60 CSS px 显示，故由 assets/whale-icon-small.svg 渲染 128px）
 │   └── app.js
 ├── docs/
 │   └── plugin-management.md  # 插件管理设计（目录布局、链接/复制双模式、接线、更新机制）
-├── assets/                   # 应用图标源
-│   ├── whale-favicon.svg     # 官方 favicon 源（黑色鲸鱼）
-│   ├── whale-icon.svg        # 成品矢量图标（黑鲸 + 红眼）
-│   └── whale-icon-512.png    # 512px 位图母版（由此降采样并打包 ICO/ICNS）
+├── assets/                   # 全仓库图标母版（scripts/build-icons.sh 由此再生成一切）
+│   ├── whale-icon.svg        # 完整细节母版（黑鲸 + 红眼，用于 ≥128px）
+│   ├── whale-icon-small.svg  # 小尺寸母版（红眼夸大版，用于 ≤64px 与 favicon 投影）
+│   └── whale-icon-512.png    # 512px 位图（脚本从 whale-icon.svg 渲染）
+├── scripts/
+│   └── build-icons.sh        # 从双 SVG 母版再生成全部图标：src-tauri/icons、ui/whale-icon.png、website 与 apps/web 的 favicon
 ├── src-tauri/
 │   ├── tauri.conf.json       # Tauri v2 配置（frontendDist → ../ui）
 │   ├── Cargo.toml
