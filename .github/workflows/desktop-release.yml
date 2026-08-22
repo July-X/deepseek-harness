@@ -6,9 +6,12 @@
 #                     last x86_64 macOS image, available until 2027-08)
 #   * Windows      -> windows-latest runner (x86_64) produces installer + exe
 #
-# Trigger by pushing a tag `desktop-v<version>` whose version matches
-# `desktop/package.json` (and `src-tauri/tauri.conf.json` — the verify step
-# below fails the run otherwise), or run it manually from the Actions tab.
+# Trigger by pushing a tag `desktop-v<version>` on the develop branch whose
+# version matches `desktop/package.json` (and `src-tauri/tauri.conf.json` —
+# the verify step below fails the run otherwise), or run it manually from the
+# Actions tab on develop. Tags pointing at commits outside develop (e.g.
+# master) and dispatches on any other ref are rejected by the verify step:
+# releases only ever ship from develop.
 # Releases are created as drafts so a human publishes them; the same draft is
 # appended on re-runs of the same tag.
 
@@ -39,9 +42,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Verify the tag matches the app version
+      - name: Verify the tag matches the app version and sits on develop
+        id: meta
         shell: pwsh
         run: |
+          # Releases ship only from develop: a tag must name a commit that is
+          # reachable from origin/develop, and a manual dispatch must select
+          # the develop ref. (checkout gives us the tagged commit detached;
+          # deepen the develop fetch so ancestry is decidable for tags that
+          # are not develop's head.)
+          if ($env:GITHUB_REF_TYPE -eq 'branch' -and $env:GITHUB_REF_NAME -ne 'develop') {
+            throw "desktop releases only run on develop; dispatched ref was $env:GITHUB_REF_NAME"
+          }
+          git fetch --depth=100 origin develop
+          git merge-base --is-ancestor HEAD FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "tag $env:GITHUB_REF_NAME does not point at a commit on develop"
+          }
+
           $conf = Get-Content desktop/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
           $pkg = Get-Content desktop/package.json -Raw | ConvertFrom-Json
           if ($conf.version -ne $pkg.version) {
@@ -50,6 +68,7 @@ jobs:
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "desktop-v$($conf.version)") {
             throw "tag $env:GITHUB_REF_NAME does not match desktop version $($conf.version)"
           }
+          "prerelease=$(([bool]($conf.version -match '-')).ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
       - uses: pnpm/action-setup@v4
         with:
@@ -83,4 +102,6 @@ jobs:
 
             使用方式：安装后在「内核版本」页安装并切换 deepseek-harness 内核版本即可使用。
           releaseDraft: true
-          prerelease: false
+          # The verify step derives this from the app version: any prerelease
+          # suffix (0.1.0-rc.1) marks the draft as a prerelease.
+          prerelease: ${{ fromJSON(steps.meta.outputs.prerelease) }}

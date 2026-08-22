@@ -98,7 +98,7 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
 - 图标全仓库统一双母版：`assets/whale-icon.svg`（≥128px，完整红眼细节）与 `assets/whale-icon-small.svg`（≤64px、favicon 及 `ui/whale-icon.png`——面板顶栏只按 60 CSS px 显示；小尺寸下细节是亚像素，必须简化）。改设计只改这两个 SVG，然后跑 `scripts/build-icons.sh`（需 rsvg-convert + ImageMagick + macOS iconutil）一次性再生成：`src-tauri/icons` 全套（按尺寸选母版合成 ico/icns）、`assets/whale-icon-512.png`、`ui/whale-icon.png`（小母版渲染 128px）、`website/public/favicon.svg`（品牌蓝鲸身）与 `apps/web/public/favicon.svg`（深色模式转白，pwa-manifest.e2e.ts 锁定该行为）。不要再用 `tauri icon` 单母版再生成——它会把小尺寸帧覆盖回细节版。眼睛射线必须用 `<polygon>` 而非 `<path>`，否则 apps/web 深色模式的 `path { fill: #fff }` 会把它漂白。`src-tauri/icons` 只提交被 `tauri.conf.json` 引用的文件（icon.icns/icon.ico/32x32/128x128/128x128@2x）。改图标后重启应用，Dock 图标缓存才会刷新。
 - Windows 兼容：`.cmd` 脚本不能直接 spawn，须经 `%ComSpec% /C`（见 `run_pnpm`）；新增子进程调用保持同样分支。
 - 进程回收：内核子进程在 Unix 上 `setsid` 独立进程组，停止时杀整组；应用退出时兜底回收（`lib.rs` 的 `RunEvent::Exit`）。新增后台进程沿用该模式。
-- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。
+- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。
 
 ## 已知坑
 

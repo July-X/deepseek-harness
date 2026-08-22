@@ -503,6 +503,10 @@ describe('Desktop release workflow', () => {
     const steps = build.steps.filter(isRecord)
     // The tag must name the version in tauri.conf.json/package.json before any build.
     expect(JSON.stringify(steps[1])).toContain('desktop-v$($conf.version)')
+    // Releases ship only from develop: tags must name a commit reachable from
+    // origin/develop and dispatches must select the develop ref.
+    expect(JSON.stringify(steps[1])).toContain('is-ancestor HEAD FETCH_HEAD')
+    expect(JSON.stringify(steps[1])).toContain("GITHUB_REF_NAME -ne 'develop'")
     // desktop/ sits outside the pnpm workspace; install must not walk up to the root.
     expect(JSON.stringify(steps)).toContain('pnpm install --ignore-workspace')
     expect(JSON.stringify(steps)).toContain('tauri-apps/tauri-action@v1')
