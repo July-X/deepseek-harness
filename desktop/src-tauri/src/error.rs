@@ -11,6 +11,8 @@ pub enum AppError {
     Kernel(String),
     #[error("插件错误：{0}")]
     Plugin(String),
+    #[error("桌面端更新错误：{0}")]
+    Update(String),
 }
 
 impl From<std::io::Error> for AppError {

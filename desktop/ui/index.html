@@ -130,7 +130,10 @@
             <dd id="kernelNode">—</dd>
             <dt>数据目录</dt>
             <dd id="kernelHome">—</dd>
+            <dt>桌面端版本</dt>
+            <dd id="shellVersion">—</dd>
           </dl>
+          <div id="shellUpdateBanner" class="warning hidden"></div>
           <div class="btn-row">
             <button id="btnToggle" type="button">
               <svg class="icon"><use href="#i-power" /></svg><span id="btnToggleLabel">启动工作台</span>
@@ -140,6 +143,12 @@
             </button>
             <button id="btnLogs" type="button" class="ghost">
               <svg class="icon"><use href="#i-file-text" /></svg><span>查看日志</span>
+            </button>
+            <button id="btnShellCheck" type="button" class="ghost">
+              <svg class="icon"><use href="#i-refresh" /></svg><span>检查桌面端更新</span>
+            </button>
+            <button id="btnShellInstall" type="button" class="hidden">
+              <svg class="icon"><use href="#i-refresh" /></svg><span id="btnShellInstallLabel">更新并重启</span>
             </button>
           </div>
           <p id="startHint" class="muted hidden">尚未安装可用内核，请先到「内核版本」页安装。</p>

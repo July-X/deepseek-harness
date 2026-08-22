@@ -16,7 +16,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
-use crate::{kernel, node, plugins, releases, settings};
+use crate::{kernel, node, plugins, releases, settings, updater};
 
 /// Shared shell state installed as a Tauri managed state.
 pub struct AppState {
@@ -33,6 +33,8 @@ pub struct AppState {
 /// Everything the management UI needs on the first render.
 #[derive(Serialize)]
 pub struct StatusView {
+    /// Version of the running shell itself (from tauri.conf.json).
+    pub shell_version: String,
     pub kernel: kernel::KernelStatus,
     pub node: node::NodeInfo,
     pub settings: settings::Settings,
@@ -78,13 +80,14 @@ fn app_err(app: &AppState, e: impl std::fmt::Display) -> String {
 // --- status ---------------------------------------------------------------
 
 #[tauri::command]
-pub fn get_status(state: State<'_, AppState>) -> StatusView {
+pub fn get_status(app: AppHandle, state: State<'_, AppState>) -> StatusView {
     let data_dir = state.data_dir.clone();
     let settings = settings::load(&data_dir);
     let kernel_status = kernel::status(&data_dir, &settings);
     let node_info = cached_node(&state, &settings);
     let kernel_log = read_tail(&kernel::logs_dir(&data_dir).join("kernel.log"), 8 * 1024);
     StatusView {
+        shell_version: app.package_info().version.to_string(),
         kernel: kernel_status,
         node: node_info,
         settings,
@@ -132,6 +135,24 @@ pub fn get_kernel_log(state: State<'_, AppState>) -> String {
         &kernel::logs_dir(&state.data_dir).join("kernel.log"),
         16 * 1024,
     )
+}
+
+// --- shell self-update -----------------------------------------------------
+
+/// Check GitHub for a newer shell release (manual「检查更新」button).
+#[tauri::command]
+pub async fn check_shell_update(app: AppHandle) -> Result<updater::ShellUpdateInfo, String> {
+    updater::check(&app).await.map_err(|e| e.to_string())
+}
+
+/// Download, verify, and install the pending shell update, then restart.
+#[tauri::command]
+pub async fn install_shell_update(app: AppHandle, on_event: Channel<String>) -> Result<(), String> {
+    updater::install(&app, move |line| {
+        let _ = on_event.send(line.to_string());
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // --- releases --------------------------------------------------------------

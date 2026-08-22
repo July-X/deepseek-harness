@@ -27,6 +27,7 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg", "nsis"],
+    "createUpdaterArtifacts": true,
     "category": "DeveloperTool",
     "shortDescription": "DeepSeek Harness desktop shell",
     "longDescription": "Desktop shell that runs the DeepSeek Harness web UI with kernel version management and updates.",
@@ -44,6 +45,14 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyMThFOUY4OUI0MkNGNDEKUldSQnowS2IrT2tZSWlTQUo4TXhJTVJZRGhKZWJ6SmVOTXFtZzBWcXhVYmNGamlHNldYOFBCb1YK",
+      "endpoints": [
+        "https://github.com/July-X/deepseek-harness/releases/latest/download/latest.json"
+      ]
     }
   }
 }

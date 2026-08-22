@@ -150,6 +150,7 @@ function renderStatus(view) {
     ? [node.path, node.version].filter(Boolean).join('  ')
     : '未检测到可用 Node（' + node.reason + '）';
   $('kernelHome').textContent = kernel.dsh_home;
+  $('shellVersion').textContent = 'v' + view.shell_version;
 
   $('updateInstalled').textContent = String((kernel.installed || []).length) + ' 个';
 
@@ -390,6 +391,49 @@ function checkUpdates() {
     .finally(() => setBusy(false));
 }
 
+// --- shell self-update -------------------------------------------------------
+// The shell updates itself from the latest published GitHub release (the
+// kernel has its own version menu). A background check runs at startup and
+// raises the banner via `shell-update-available`; the button re-checks on
+// demand, and「更新并重启」downloads, verifies, installs, and relaunches.
+
+function showShellUpdateBanner(version) {
+  const banner = $('shellUpdateBanner');
+  banner.textContent = '发现桌面端新版本 v' + version + '（当前 v' + (currentView ? currentView.shell_version : '?') + '）';
+  banner.classList.remove('hidden');
+  $('btnShellInstall').classList.remove('hidden');
+}
+
+function checkShellUpdate(manual) {
+  invoke('check_shell_update')
+    .then((info) => {
+      if (info.available) {
+        showShellUpdateBanner(info.available);
+      } else if (manual) {
+        toast('桌面端已是最新（v' + info.current + '）');
+      }
+    })
+    .catch((e) => {
+      if (manual) {
+        toast('检查桌面端更新失败：' + e, 5000);
+      }
+    });
+}
+
+function installShellUpdate() {
+  const channel = new core.Channel();
+  channel.onmessage = (msg) => {
+    $('shellUpdateBanner').textContent = msg;
+  };
+  $('btnShellInstall').disabled = true;
+  invoke('install_shell_update', { onEvent: channel })
+    .catch((e) => {
+      toast('桌面端更新失败：' + e, 6000);
+      $('btnShellInstall').disabled = false;
+    });
+  // On success the app restarts into the new version; nothing else to do.
+}
+
 function installVersion(version) {
   const channel = new core.Channel();
   channel.onmessage = (msg) => {
@@ -603,6 +647,16 @@ $('btnConfirmCancel').addEventListener('click', () => settleConfirm(false));
 $('btnDetectNode').addEventListener('click', detectNode);
 $('btnSaveSettings').addEventListener('click', saveSettings);
 $('btnProgressClose').addEventListener('click', closeProgress);
+$('btnShellCheck').addEventListener('click', () => checkShellUpdate(true));
+$('btnShellInstall').addEventListener('click', installShellUpdate);
+
+// Startup self-update discovery: the shell emits this after its background
+// check; the manual button covers on-demand checks.
+if (window.__TAURI__ && window.__TAURI__.event) {
+  window.__TAURI__.event.listen('shell-update-available', (e) => {
+    showShellUpdateBanner(e.payload);
+  });
+}
 
 // --- menu navigation --------------------------------------------------------
 //

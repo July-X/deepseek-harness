@@ -99,7 +99,8 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
 - Windows 兼容：`.cmd` 脚本不能直接 spawn，须经 `%ComSpec% /C`（见 `run_pnpm`）；新增子进程调用保持同样分支。GUI 子系统下每个 `Command` 都必须过 `process.rs` 的 `quiet()`（CREATE_NO_WINDOW），否则用户会看到终端窗口频闪。
 - 频繁轮询的路径不要拉起子进程：`get_status` 每 2.5s 一次，`node::resolve` 的结果按 `node_path` 缓存进 `AppState.node_cache`；新增轮询字段先确认它是纯文件/网络读取。
 - 进程回收：内核子进程在 Unix 上 `setsid` 独立进程组，停止时杀整组；应用退出时兜底回收（`lib.rs` 的 `RunEvent::Exit`）。新增后台进程沿用该模式。
-- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。
+- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。workflow 用 `TAURI_SIGNING_PRIVATE_KEY` secret 给更新制品签名，与 `tauri.conf.json` 钉死的 updater pubkey 配对——轮换密钥时两者必须一起换。
+- 外壳自更新走 `tauri-plugin-updater`（见 `src/updater.rs`）：启动 3 秒后后台检查并 emit `shell-update-available`，概览页显示当前版本 + 手动检查按钮；endpoint 只认已发布且标记为 latest 的 release（draft 不可见）。
 
 ## 已知坑
 

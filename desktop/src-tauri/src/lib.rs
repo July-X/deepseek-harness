@@ -13,6 +13,7 @@ mod plugins;
 mod process;
 mod releases;
 mod settings;
+mod updater;
 mod version;
 
 use std::sync::Mutex;
@@ -29,6 +30,7 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = kernel::data_dir(app.handle());
             app.manage(AppState {
@@ -36,6 +38,7 @@ pub fn run() {
                 running: Mutex::new(None),
                 node_cache: Mutex::new(None),
             });
+            updater::spawn_background_check(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -43,6 +46,8 @@ pub fn run() {
             commands::detect_node,
             commands::save_settings,
             commands::get_kernel_log,
+            commands::check_shell_update,
+            commands::install_shell_update,
             commands::fetch_releases,
             commands::install_kernel,
             commands::activate_version,

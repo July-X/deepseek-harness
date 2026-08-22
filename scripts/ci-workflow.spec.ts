@@ -510,6 +510,17 @@ describe('Desktop release workflow', () => {
     // desktop/ sits outside the pnpm workspace; install must not walk up to the root.
     expect(JSON.stringify(steps)).toContain('pnpm install --ignore-workspace')
     expect(JSON.stringify(steps)).toContain('tauri-apps/tauri-action@v1')
+
+    // The in-app updater works only when the workflow signs the updater
+    // artifacts AND the bundle config pins the pubkey + latest.json endpoint.
+    expect(JSON.stringify(steps)).toContain('TAURI_SIGNING_PRIVATE_KEY')
+    const conf: unknown = JSON.parse(readFileSync(resolve(root, 'desktop/src-tauri/tauri.conf.json'), 'utf8'))
+    if (!isRecord(conf) || !isRecord(conf.bundle) || !isRecord(conf.plugins) || !isRecord(conf.plugins.updater)) {
+      throw new TypeError('tauri.conf.json must define bundle and plugins.updater')
+    }
+    expect(conf.bundle.createUpdaterArtifacts).toBe(true)
+    expect(String(conf.plugins.updater.pubkey)).not.toHaveLength(0)
+    expect(JSON.stringify(conf.plugins.updater.endpoints)).toContain('releases/latest/download/latest.json')
   })
 })
 
