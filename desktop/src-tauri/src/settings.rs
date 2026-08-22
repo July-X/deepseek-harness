@@ -22,6 +22,11 @@ pub struct Settings {
     /// Explicit path to the `pnpm` executable; when empty it is resolved next
     /// to `node` or from the environment. pnpm installs kernel versions.
     pub pnpm_path: Option<String>,
+    /// Explicit path to the `npm` executable; when empty it is resolved next
+    /// to `node` or from the environment. npm is the auto-install fallback
+    /// when pnpm is missing, so a custom install (portable layout, nvm
+    /// without the node-sibling npm) needs this slot to skip a wasted probe.
+    pub npm_path: Option<String>,
     /// Port the kernel's web UI listens on (dsh defaults to 3080).
     pub port: u16,
     /// Profile name the shell wires plugins into (dsh default: web).
@@ -33,6 +38,7 @@ impl Default for Settings {
         Self {
             node_path: None,
             pnpm_path: None,
+            npm_path: None,
             port: DEFAULT_PORT,
             profile: crate::plugins::DEFAULT_PROFILE.to_string(),
         }

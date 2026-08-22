@@ -28,7 +28,11 @@ const USER_AGENT: &str = concat!("dsh-desktop/", env!("CARGO_PKG_VERSION"));
 /// npm registry endpoint for the `@deepseek-ai/dsh` package. The npm
 /// registry returns a full JSON document with all published versions,
 /// `dist-tags`, scripts, and metadata; it is what `npm view` reads.
-const NPM_REGISTRY_URL: &str = "https://registry.npmjs.org/@deepseek-ai/dsh";
+/// Resolved through `registry::npm_registry_base()` so the shell's mirror
+/// choice applies to the release list the update menu consumes.
+fn npm_registry_url() -> String {
+    format!("{}@deepseek-ai/dsh", crate::registry::npm_registry_base())
+}
 /// Human-facing web URL used in the update menu's "open release" link.
 pub const NPM_PACKAGE_URL: &str = "https://www.npmjs.com/package/@deepseek-ai/dsh";
 
@@ -117,7 +121,8 @@ impl NpmPackageDoc {
 
 /// Fetch the kernel version list from the npm registry.
 fn fetch_npm() -> Result<Vec<ReleaseInfo>, String> {
-    let response = ureq::get(NPM_REGISTRY_URL)
+    let url = npm_registry_url();
+    let response = ureq::get(&url)
         .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|e: ureq::Error| e.to_string())?;

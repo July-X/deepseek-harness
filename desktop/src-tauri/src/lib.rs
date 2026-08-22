@@ -6,11 +6,13 @@
 //! the local `ui/` frontend through the commands in [`commands`].
 
 mod commands;
+mod env;
 mod error;
 mod kernel;
 mod node;
 mod plugins;
 mod process;
+mod registry;
 mod releases;
 mod settings;
 mod updater;

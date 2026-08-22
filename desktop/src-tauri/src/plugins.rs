@@ -36,8 +36,6 @@ const STORE_SUBDIR: &str = "plugins";
 const STORE_FILE: &str = "store.json";
 /// Per-plugin fetch marker inside each store entry.
 const SOURCE_MARKER: &str = ".dsh-source.json";
-/// npm registry base for metadata and tarballs.
-const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
 /// Community catalog, primary source: the dsh-plugin.org hub (the data feed
 /// behind the DSH-Plugin Hub plugin center).
 const HUB_CATALOG_URL: &str = "https://dsh-plugin.org/api/plugins.zh.json";
@@ -346,11 +344,10 @@ fn save_store(data_dir: &Path, store: &Store) -> Result<(), AppError> {
 /// existing file so a previous (broken) shape gets corrected in place.
 fn ensure_store_npmrc(data_dir: &Path) -> Result<(), AppError> {
     let npmrc = store_dir(data_dir).join(".npmrc");
-    let text = "\
-minimumReleaseAge=0
-registry=https://registry.npmjs.org/
-@deepseek-ai:registry=https://registry.npmjs.org/
-";
+    let registry = crate::registry::npm_registry_base();
+    let text = format!(
+        "minimumReleaseAge=0\nregistry={registry}\n@deepseek-ai:registry={registry}\n"
+    );
     fs::write(&npmrc, text).map_err(|e| AppError::Io(e.to_string()))?;
     Ok(())
 }
@@ -562,7 +559,7 @@ fn run_capture(program: &str, args: &[&str]) -> io::Result<(bool, String)> {
 
 /// Fetch the npm registry document for a package.
 fn fetch_npm_doc(name: &str) -> Result<NpmDoc, String> {
-    let url = format!("{NPM_REGISTRY}{name}");
+    let url = format!("{}{}", crate::registry::npm_registry_base(), name);
     let mut response = ureq::get(&url)
         .header("User-Agent", USER_AGENT)
         .call()
@@ -1349,7 +1346,7 @@ pub fn ensure_wiring(
 /// recorded in the store for plugin_status.warning instead of blocking the
 /// action.
 pub fn ensure_wiring_quiet(data_dir: &Path, settings: &settings::Settings) -> Result<(), String> {
-    let (_, pnpm_exe, _) = commands::promise_pnpm(data_dir)?;
+    let (_, pnpm_exe, _) = commands::promise_pnpm(data_dir, |_| {})?;
     let mut noop = |_: &str| {};
     match ensure_wiring(data_dir, settings, &pnpm_exe, &mut noop) {
         Ok(_) => {
