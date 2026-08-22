@@ -36,8 +36,12 @@ const STORE_FILE: &str = "store.json";
 const SOURCE_MARKER: &str = ".dsh-source.json";
 /// npm registry base for metadata and tarballs.
 const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
-/// Community catalog (the reference market's hourly-generated listing).
-const CATALOG_URL: &str =
+/// Community catalog, primary source: the dsh-plugin.org hub (the data feed
+/// behind the DSH-Plugin Hub plugin center).
+const HUB_CATALOG_URL: &str = "https://dsh-plugin.org/api/plugins.zh.json";
+/// Community catalog, fallback source: the reference market's listing, used
+/// when the hub is unreachable.
+const MARKET_CATALOG_URL: &str =
     "https://raw.githubusercontent.com/losebird/dsh-plugin-market/main/registry/all.json";
 /// Catalog cache file under the shell data dir.
 const CATALOG_CACHE_FILE: &str = "plugins-catalog.json";
@@ -176,14 +180,16 @@ pub struct PluginStatus {
     pub warning: Option<String>,
 }
 
-/// One catalog entry surfacing in search results.
-#[derive(Debug, Clone, Serialize)]
+/// One catalog entry surfacing in the plugin center.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogItem {
     pub id: String,
     pub name: String,
     pub kind: String,
     pub description: String,
     pub stars: u64,
+    #[serde(default)]
+    pub forks: u64,
     pub downloads: u64,
     pub verified: bool,
     pub repo: Option<String>,
@@ -192,6 +198,17 @@ pub struct CatalogItem {
     /// npm or git, derived from the entry's install method.
     pub origin: String,
     pub category: String,
+    /// Latest published version string (may carry a leading `v`).
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// ISO timestamp of the last upstream update, when known.
+    #[serde(default)]
+    pub updated: String,
+    /// Human-facing detail page (dsh-plugin.org or the repository).
+    #[serde(default)]
+    pub detail_url: String,
 }
 
 /// npm registry document slice we need.
@@ -316,7 +333,24 @@ pub fn load_store(data_dir: &Path) -> Store {
 fn save_store(data_dir: &Path, store: &Store) -> Result<(), AppError> {
     fs::create_dir_all(store_dir(data_dir)).map_err(|e| AppError::Io(e.to_string()))?;
     let text = serde_json::to_string_pretty(store).map_err(|e| AppError::Io(e.to_string()))?;
-    fs::write(store_file(data_dir), text + "\n").map_err(|e| AppError::Io(e.to_string()))
+    fs::write(store_file(data_dir), text + "\n").map_err(|e| AppError::Io(e.to_string()))?;
+    ensure_store_npmrc(data_dir)
+}
+
+/// Write a local .npmrc in the store directory.  Fresh pnpm defaults a
+/// `minimumReleaseAge` of ~3 days so locked dev/rc versions stay installable
+/// without waiting out the gate, and pins the registry mirror the desktop
+/// shell already uses so mirror-only scoped packages resolve.  Replaces any
+/// existing file so a previous (broken) shape gets corrected in place.
+fn ensure_store_npmrc(data_dir: &Path) -> Result<(), AppError> {
+    let npmrc = store_dir(data_dir).join(".npmrc");
+    let text = "\
+minimumReleaseAge=0
+registry=https://registry.npmjs.org/
+@deepseek-ai:registry=https://registry.npmjs.org/
+";
+    fs::write(&npmrc, text).map_err(|e| AppError::Io(e.to_string()))?;
+    Ok(())
 }
 
 fn store_item(data_dir: &Path, id: &str) -> Option<StoreItem> {
@@ -609,6 +643,12 @@ fn fetch_into_store(
         }
     };
 
+    on_progress("正在校验插件是否符合 dsh 规范");
+    if let Err(e) = validate_plugin(&tmp) {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+
     let final_dir = store_plugin_dir(data_dir, &spec.id);
     if final_dir.exists() {
         // 更新路径：旧目录先移走再删除，rename 失败也不破坏新内容
@@ -757,6 +797,52 @@ fn manifest_is_bundle(plugin_root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// What the kernel needs to load an installed plugin: a parseable
+/// package.json with a name; when the package declares a bundle layer its
+/// patch file must exist, otherwise it needs a resolvable `main`/`exports`
+/// entry. Runs right after fetch so a non-conforming package fails the
+/// install loudly instead of breaking the next kernel boot.
+fn validate_plugin(dir: &Path) -> Result<(), AppError> {
+    let root = read_plugin_manifest(dir)
+        .map_err(|_| AppError::Plugin("不符合 dsh 插件规范：缺少可解析的 package.json".into()))?;
+    let name = root.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return Err(AppError::Plugin(
+            "不符合 dsh 插件规范：package.json 缺少 name 字段".into(),
+        ));
+    }
+    if let Some(patch) = root
+        .get("dsh")
+        .and_then(|d| d.get("bundle"))
+        .and_then(|b| b.get("patch"))
+        .and_then(|p| p.as_str())
+    {
+        if patch.is_empty() || !dir.join(patch).is_file() {
+            return Err(AppError::Plugin(format!(
+                "不符合 dsh 插件规范：声明了 bundle 层但包内找不到 patch 文件 {patch:?}，内核启动将无法加载该层"
+            )));
+        }
+        return Ok(());
+    }
+    let main = root.get("main").and_then(|m| m.as_str()).unwrap_or("");
+    if !main.is_empty() {
+        // Node 解析 main 时允许省略 .js 后缀，两者都接受。
+        if dir.join(main).is_file() || dir.join(format!("{main}.js")).is_file() {
+            return Ok(());
+        }
+        return Err(AppError::Plugin(format!(
+            "不符合 dsh 插件规范：main 入口 {main:?} 在包内不存在，内核无法加载"
+        )));
+    }
+    if root.get("exports").is_some() {
+        return Ok(());
+    }
+    Err(AppError::Plugin(
+        "不符合 dsh 插件规范：既未声明 dsh.bundle.patch，也没有 main/exports 入口，内核无法加载"
+            .into(),
+    ))
+}
+
 /// Install the plugin's own dependencies inside the store dir. Only link
 /// mode needs this (copy mode lets the profile's pnpm handle them).
 fn install_store_deps(
@@ -771,17 +857,27 @@ fn install_store_deps(
         return Ok(());
     }
     on_progress("正在安装插件自身依赖（pnpm）");
+
+    // Delete any stale lockfile so pnpm re-resolves without minimumReleaseAge violations
+    // from entries locked to recently-published rc versions.  A fresh install without a
+    // lockfile re-resolves everything from the registry and is always safe.
+    let lockfile = dir.join("pnpm-lock.yaml");
+    if lockfile.is_file() {
+        fs::remove_file(&lockfile).ok();
+    }
+
     let args = [
         "install",
         "--ignore-workspace",
         "--config.node-linker=hoisted",
         "--reporter=append-only",
     ];
-    let status = kernel::run_pnpm(pnpm_exe, &args, &log_path, &mut *on_progress).map_err(|e| {
-        AppError::Io(format!(
-            "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
-        ))
-    })?;
+    let status =
+        kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut *on_progress).map_err(|e| {
+            AppError::Io(format!(
+                "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
+            ))
+        })?;
     if !status.success() && !dir.join("node_modules").is_dir() {
         return Err(AppError::Plugin(format!(
             "插件依赖安装失败（退出码 {:?}），详情见日志：{}",
@@ -809,19 +905,43 @@ pub fn materialize_one(
     let source = store_plugin_dir(data_dir, &item.id);
     let target = kernel_plugin_dir(data_dir, version, &item.id);
     let meta = read_meta(data_dir, version, &item.id);
+
+    // Resolve the store path once: if the store source itself is a symlink
+    // (e.g. a git-origin plugin cloned into the store), use the actual
+    // filesystem location so the kernel plugin dir gets a direct link —
+    // avoiding the double-symlink chain that breaks Node's realpath.
+    let resolved_source = fs::symlink_metadata(&source)
+        .ok()
+        .filter(|m| m.file_type().is_symlink())
+        .and_then(|_| fs::read_link(&source).ok())
+        .unwrap_or_else(|| source.to_path_buf());
+
     let fresh = meta
         .as_ref()
         .map(|m| m.version == item.installed_version && m.mode == item.mode)
         .unwrap_or(false);
-    if fresh && source.exists() && target.exists() {
-        return Ok(meta.map(|m| m.mode).unwrap_or_else(|| item.mode.clone()));
+
+    // If the metadata says nothing changed AND the target exists, verify the
+    // target symlink is actually correct.  A prior run may have left a stale
+    // double-symlink chain even though the recorded version and mode are
+    // unchanged — falling through re-creates the correct direct link.
+    if fresh && target.exists() {
+        let target_ok = fs::symlink_metadata(&target)
+            .ok()
+            .filter(|m| m.file_type().is_symlink())
+            .and_then(|_| fs::read_link(&target).ok())
+            .map(|link| link == resolved_source)
+            .unwrap_or(false);
+        if target_ok {
+            return Ok(meta.map(|m| m.mode).unwrap_or_else(|| item.mode.clone()));
+        }
     }
 
     // 清除旧产物（错误残留：非链接目录、指向别处的链接或旧版本副本）
     remove_materialized(data_dir, version, &item.id);
 
     let mut actual = item.mode.clone();
-    if item.mode == "link" && make_dir_link(&source, &target).is_err() {
+    if item.mode == "link" && make_dir_link(&resolved_source, &target).is_err() {
         // 链接失败（Windows 权限、文件系统不支持）→ 降级复制
         actual = String::from("copy");
         eprintln!(
@@ -1002,10 +1122,14 @@ fn ensure_profile(data_dir: &Path, profile: &str) -> Result<(), AppError> {
         let _ = fs::write(&patch, "# Your patch layer for this dsh profile.\n[]\n");
     }
     let workspace = dir.join("pnpm-workspace.yaml");
-    if !workspace.exists() {
+    let needs_workspace = !workspace.exists()
+        || fs::read_to_string(&workspace)
+            .map(|t| !t.contains("minimumReleaseAge=0"))
+            .unwrap_or(false);
+    if needs_workspace {
         let _ = fs::write(
             &workspace,
-            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n",
+            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\nminimumReleaseAge=0\n",
         );
     }
     Ok(())
@@ -1020,7 +1144,12 @@ fn is_managed_spec(spec: &str) -> bool {
 /// Reconcile the profile manifest against the store for the ACTIVE kernel:
 /// set each item's dependency to the materialized dir, maintain bundle
 /// layers, rewrite specs when the active kernel changed. Runs pnpm install
-/// only when the manifest actually changed.
+/// when the manifest changed or the profile's node_modules is missing.
+///
+/// The manifest write is transactional: when pnpm fails the manifest is
+/// rolled back, because a bundles entry that cannot resolve crashes the
+/// kernel at boot. An empty store still reconciles, so uninstalling the last
+/// plugin prunes its residue instead of leaving an unresolvable layer behind.
 ///
 /// Returns (wired_count, changed).
 pub fn ensure_wiring(
@@ -1030,67 +1159,74 @@ pub fn ensure_wiring(
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(usize, bool), AppError> {
     let store = load_store(data_dir);
-    if store.items.is_empty() {
-        return Ok((0, false));
-    }
     ensure_profile(data_dir, &settings.profile)?;
-    let Some(active) = kernel::read_active(data_dir) else {
-        return Ok((0, false));
-    };
+
+    // 物化活动内核，再据插件清单决定 bundle 层；没有活动内核且仍有插件时
+    // 等内核装好再接线（store 为空则继续，让下面的清退逻辑跑掉残留）。
+    let mut specs: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    match kernel::read_active(data_dir) {
+        Some(active) => {
+            for item in &store.items {
+                refresh_store_peers(data_dir, item, &active)?;
+                let actual = materialize_one(data_dir, &active, item)?;
+                let prefix = if actual == "copy" {
+                    SPEC_FILE
+                } else {
+                    SPEC_LINK
+                };
+                let rel = relative_path(
+                    &profile_dir(data_dir, &settings.profile),
+                    &kernel_plugin_dir(data_dir, &active, &item.id),
+                );
+                specs.insert(
+                    item.name.clone(),
+                    (
+                        format!("{prefix}{}", spec_path_string(&rel)),
+                        manifest_is_bundle(&kernel_plugin_dir(data_dir, &active, &item.id)),
+                    ),
+                );
+            }
+        }
+        None if !store.items.is_empty() => return Ok((0, false)),
+        None => {}
+    }
 
     let mut root = read_profile_json(data_dir, &settings.profile)?
         .ok_or_else(|| AppError::Plugin("profile 尚未初始化".into()))?;
-
-    // 物化活动内核，再据插件清单决定 bundle 层
-    let mut specs: BTreeMap<String, (String, bool)> = BTreeMap::new();
-    for item in &store.items {
-        refresh_store_peers(data_dir, item, &active)?;
-        let actual = materialize_one(data_dir, &active, item)?;
-        let prefix = if actual == "copy" {
-            SPEC_FILE
-        } else {
-            SPEC_LINK
-        };
-        let rel = relative_path(
-            &profile_dir(data_dir, &settings.profile),
-            &kernel_plugin_dir(data_dir, &active, &item.id),
-        );
-        specs.insert(
-            item.name.clone(),
-            (
-                format!("{prefix}{}", spec_path_string(&rel)),
-                manifest_is_bundle(&kernel_plugin_dir(data_dir, &active, &item.id)),
-            ),
-        );
-    }
-
+    let previous = root.clone();
     let changed = wire_manifest(&mut root, &specs, &settings.profile)?;
 
-    if !changed {
+    // manifest 没变但 node_modules 缺失（上次 pnpm 失败或目录被清）也必须
+    // 重装，否则 bundles 里的层解析不了，内核启动即崩。
+    let profile = profile_dir(data_dir, &settings.profile);
+    let node_modules_missing = !profile.join("node_modules").is_dir();
+    if !changed && !node_modules_missing {
         return Ok((specs.len(), false));
     }
-    write_profile_json(data_dir, &settings.profile, &root)?;
+    if changed {
+        write_profile_json(data_dir, &settings.profile, &root)?;
+    }
     on_progress("正在同步 profile 依赖（pnpm install）");
     let log_path = wiring_log_path(data_dir);
     let status = kernel::run_pnpm(
         pnpm_exe,
         &["install", "--reporter=append-only"],
+        &profile,
         &log_path,
         on_progress,
     )
     .map_err(|e| AppError::Io(format!("无法运行 pnpm（{e}）")))?;
-    if !status.success()
-        && !profile_dir(data_dir, &settings.profile)
-            .join("node_modules")
-            .is_dir()
-    {
+    if !status.success() {
+        if changed {
+            let _ = write_profile_json(data_dir, &settings.profile, &previous);
+        }
         return Err(AppError::Plugin(format!(
-            "pnpm install 在 profile 中失败（退出码 {:?}），详情见日志：{}",
+            "pnpm install 在 profile 中失败（退出码 {:?}），已回滚 profile 配置，详情见日志：{}",
             status.code(),
             log_path.display()
         )));
     }
-    Ok((specs.len(), true))
+    Ok((specs.len(), changed))
 }
 
 /// Quiet wiring for sync commands (kernel switch / start): failures are
@@ -1215,118 +1351,209 @@ struct CatalogInstall {
     method: String,
 }
 
-/// Fetch the community catalog, caching it for CATALOG_TTL_SECS.
-fn fetch_catalog(data_dir: &Path) -> Result<CatalogDoc, String> {
-    let cache = data_dir.join(CATALOG_CACHE_FILE);
-    let fresh = fs::metadata(&cache)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|m| m.elapsed().ok().map(|e| e.as_secs() < CATALOG_TTL_SECS))
-        .unwrap_or(false);
-    if fresh {
-        if let Ok(text) = fs::read_to_string(&cache) {
-            if let Ok(doc) = serde_json::from_str::<CatalogDoc>(&text) {
-                return Ok(doc);
-            }
+/// dsh-plugin.org short-key payload (`/api/plugins.zh.json`).
+#[derive(Debug, Deserialize)]
+struct HubRaw {
+    /// Plugin slug.
+    #[serde(default)]
+    s: String,
+    /// Owner slug (GitHub owner, lowercase).
+    #[serde(default)]
+    o: String,
+    /// Display name.
+    #[serde(default)]
+    n: String,
+    /// Latest version, e.g. `v3.22.1`.
+    #[serde(default)]
+    vr: String,
+    /// Category id (interface/session/memory/tools/agent/workflow/...).
+    #[serde(default)]
+    c: String,
+    /// Tags.
+    #[serde(default)]
+    t: Vec<String>,
+    /// Description.
+    #[serde(default)]
+    d: String,
+    /// GitHub repo `owner/name`.
+    #[serde(default)]
+    r: String,
+    /// Verification state; `verified` means manually reviewed.
+    #[serde(default)]
+    v: String,
+    /// Last upstream update (ISO 8601).
+    #[serde(default)]
+    u: String,
+    /// Stars.
+    #[serde(default)]
+    sg: u64,
+    /// Forks.
+    #[serde(default)]
+    fk: u64,
+}
+
+impl HubRaw {
+    /// Normalize a hub entry to the shared catalog item. The hub's official
+    /// install path is git (`dsh plugin add github:owner/repo`), so entries
+    /// with a repo install from git; repo-less entries fall back to npm.
+    fn into_item(self) -> CatalogItem {
+        let repo = (!self.r.is_empty()).then_some(self.r.clone());
+        let detail_url = if !self.o.is_empty() && !self.s.is_empty() {
+            format!("https://dsh-plugin.org/zh/plugins/{}/{}", self.o, self.s)
+        } else {
+            repo.as_ref()
+                .map(|r| format!("https://github.com/{r}"))
+                .unwrap_or_default()
+        };
+        let (origin, spec) = match &repo {
+            Some(r) => ("git", format!("https://github.com/{r}.git")),
+            None => ("npm", self.n.clone()),
+        };
+        let id = if self.s.is_empty() {
+            self.n.clone()
+        } else {
+            self.s.clone()
+        };
+        CatalogItem {
+            id,
+            name: self.n,
+            kind: String::new(),
+            description: self.d,
+            stars: self.sg,
+            forks: self.fk,
+            downloads: 0,
+            verified: self.v == "verified",
+            repo,
+            spec,
+            origin: origin.to_string(),
+            category: self.c,
+            version: self.vr,
+            tags: self.t,
+            updated: self.u,
+            detail_url,
         }
     }
-    let mut response = ureq::get(CATALOG_URL)
+}
+
+/// Normalize a reference-market entry to the shared catalog item.
+fn from_market_raw(raw: CatalogRaw) -> CatalogItem {
+    let npm_origin = raw.package.is_some()
+        || raw
+            .install
+            .as_ref()
+            .map(|i| matches!(i.method.as_str(), "npm" | "pnpm" | "dsh-plugin-add"))
+            .unwrap_or(false);
+    let (origin, spec) = if npm_origin {
+        (
+            "npm",
+            raw.package.clone().unwrap_or_else(|| raw.name.clone()),
+        )
+    } else if let Some(repo) = &raw.repo {
+        let tag = raw.version.as_deref().filter(|v| {
+            let head = v
+                .strip_prefix('v')
+                .unwrap_or(v)
+                .split_once('-')
+                .map(|(h, _)| h)
+                .unwrap_or(v);
+            let parts: Vec<&str> = head.split('.').collect();
+            parts.len() >= 2 && parts[..2].iter().all(|s| s.parse::<u64>().is_ok())
+        });
+        let base = format!("https://github.com/{repo}.git");
+        (
+            "git",
+            match tag {
+                Some(t) => format!("{base}#{t}"),
+                None => base,
+            },
+        )
+    } else {
+        ("git", raw.repo.clone().unwrap_or_default())
+    };
+    let detail_url = raw
+        .repo
+        .as_ref()
+        .map(|r| format!("https://github.com/{r}"))
+        .unwrap_or_default();
+    CatalogItem {
+        id: raw.id,
+        name: raw.name,
+        kind: raw.kind,
+        description: raw.description.unwrap_or_default(),
+        stars: raw.stars,
+        forks: 0,
+        downloads: raw.downloads,
+        verified: raw.verified,
+        repo: raw.repo,
+        spec,
+        origin: origin.to_string(),
+        category: raw.category,
+        version: raw.version.unwrap_or_default(),
+        tags: Vec::new(),
+        updated: String::new(),
+        detail_url,
+    }
+}
+
+/// GET a URL and return the body as text.
+fn fetch_text(url: &str) -> Result<String, String> {
+    let mut response = ureq::get(url)
         .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|e: ureq::Error| e.to_string())?;
-    let body = response
+    response
         .body_mut()
         .read_to_string()
-        .map_err(|e: ureq::Error| e.to_string())?;
-    let doc: CatalogDoc =
-        serde_json::from_str(&body).map_err(|e: serde_json::Error| e.to_string())?;
-    if fs::create_dir_all(data_dir).is_ok() {
-        let _ = fs::write(&cache, body);
-    }
-    Ok(doc)
+        .map_err(|e: ureq::Error| e.to_string())
 }
 
-/// Search the community catalog; empty query lists recent entries.
-pub fn catalog_search(data_dir: &Path, query: &str) -> Result<Vec<CatalogItem>, AppError> {
-    let doc =
-        fetch_catalog(data_dir).map_err(|e| AppError::Plugin(format!("目录获取失败：{e}")))?;
-    let q = query.trim().to_lowercase();
-    let mut items: Vec<CatalogItem> = doc
-        .items
-        .into_iter()
-        .filter(|raw| {
-            q.is_empty()
-                || raw.name.to_lowercase().contains(&q)
-                || raw
-                    .description
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&q)
-                || raw.category.to_lowercase().contains(&q)
-                || raw
-                    .package
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&q)
-                || raw
-                    .repo
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(&q)
-        })
-        .take(60)
-        .map(|raw| {
-            let npm_origin = raw.package.is_some()
-                || raw
-                    .install
-                    .as_ref()
-                    .map(|i| matches!(i.method.as_str(), "npm" | "pnpm" | "dsh-plugin-add"))
-                    .unwrap_or(false);
-            let (origin, spec) = if npm_origin {
-                (
-                    "npm",
-                    raw.package.clone().unwrap_or_else(|| raw.name.clone()),
-                )
-            } else if let Some(repo) = &raw.repo {
-                let tag = raw.version.as_deref().filter(|v| {
-                    let head = v
-                        .strip_prefix('v')
-                        .unwrap_or(v)
-                        .split_once('-')
-                        .map(|(h, _)| h)
-                        .unwrap_or(v);
-                    let parts: Vec<&str> = head.split('.').collect();
-                    parts.len() >= 2 && parts[..2].iter().all(|s| s.parse::<u64>().is_ok())
-                });
-                let base = format!("https://github.com/{repo}.git");
-                (
-                    "git",
-                    match tag {
-                        Some(t) => format!("{base}#{t}"),
-                        None => base,
-                    },
-                )
-            } else {
-                ("git", raw.repo.clone().unwrap_or_default())
-            };
-            CatalogItem {
-                id: raw.id.clone(),
-                name: raw.name,
-                kind: raw.kind,
-                description: raw.description.unwrap_or_default(),
-                stars: raw.stars,
-                downloads: raw.downloads,
-                verified: raw.verified,
-                repo: raw.repo,
-                spec,
-                origin: origin.to_string(),
-                category: raw.category,
+/// Fetch the community catalog, caching the normalized items for
+/// CATALOG_TTL_SECS (`force` bypasses the cache). The dsh-plugin.org hub is
+/// the primary source; the reference market listing is the fallback when the
+/// hub is unreachable.
+fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, String> {
+    let cache = data_dir.join(CATALOG_CACHE_FILE);
+    let fresh = !force
+        && fs::metadata(&cache)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.elapsed().ok().map(|e| e.as_secs() < CATALOG_TTL_SECS))
+            .unwrap_or(false);
+    if fresh {
+        if let Ok(text) = fs::read_to_string(&cache) {
+            if let Ok(items) = serde_json::from_str::<Vec<CatalogItem>>(&text) {
+                return Ok(items);
             }
-        })
-        .collect();
+        }
+    }
+    let hub = fetch_text(HUB_CATALOG_URL).and_then(|body| {
+        serde_json::from_str::<Vec<HubRaw>>(&body)
+            .map_err(|e: serde_json::Error| e.to_string())
+            .map(|raws| raws.into_iter().map(HubRaw::into_item).collect::<Vec<_>>())
+    });
+    let items = match hub {
+        Ok(items) if !items.is_empty() => items,
+        _ => {
+            let body = fetch_text(MARKET_CATALOG_URL)?;
+            let doc: CatalogDoc =
+                serde_json::from_str(&body).map_err(|e: serde_json::Error| e.to_string())?;
+            doc.items.into_iter().map(from_market_raw).collect()
+        }
+    };
+    if fs::create_dir_all(data_dir).is_ok() {
+        if let Ok(text) = serde_json::to_string(&items) {
+            let _ = fs::write(&cache, text);
+        }
+    }
+    Ok(items)
+}
+
+/// The full community catalog sorted by stars (`force` bypasses the cache).
+/// Search and category filtering happen in the UI so filtering over the
+/// cached list is instant.
+pub fn catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, AppError> {
+    let mut items = fetch_catalog(data_dir, force)
+        .map_err(|e| AppError::Plugin(format!("目录获取失败：{e}")))?;
     items.sort_by(|a, b| b.stars.cmp(&a.stars));
     Ok(items)
 }
@@ -1432,12 +1659,16 @@ pub fn install(
     let mut item = fetch_into_store(data_dir, &spec, on_progress)?;
     item.mode = if mode == "copy" { "copy" } else { "link" }.to_string();
     if item.mode == "link" {
+        // Ensure the store-level .npmrc exists before installing deps, so the
+        // minimumReleaseAge exclusion is in place even if the store was created
+        // before this fix was deployed.
+        ensure_store_npmrc(data_dir).ok();
         install_store_deps(data_dir, pnpm_exe, &item.id, on_progress)?;
     }
     upsert_item(data_dir, item.clone())?;
     sync_kernels(data_dir, &item)?;
     on_progress("正在接线到 profile");
-    let _ = ensure_wiring(data_dir, settings, pnpm_exe, on_progress);
+    ensure_wiring(data_dir, settings, pnpm_exe, on_progress)?;
     Ok(item)
 }
 
@@ -1464,12 +1695,20 @@ pub fn update(
     let mut updated = fetched;
     updated.mode = item.mode.clone();
     if updated.mode == "link" {
+        ensure_store_npmrc(data_dir).ok();
         install_store_deps(data_dir, pnpm_exe, &updated.id, on_progress)?;
     }
+    // Sync latest_version to what we just installed so the UI badge clears
+    // immediately.  Without this, the previous check_updates result lingers
+    // (and for unpinned git-origin plugins `installed_version` becomes the
+    // HEAD short hash while `latest_version` stays a semver tag, so the
+    // version compare spuriously reports "newer").  A later check_updates can
+    // still raise latest_version if the registry has moved on since then.
+    updated.latest_version = Some(updated.installed_version.clone());
     upsert_item(data_dir, updated.clone())?;
     sync_kernels(data_dir, &updated)?;
     on_progress("正在同步 profile");
-    let _ = ensure_wiring(data_dir, settings, pnpm_exe, on_progress);
+    ensure_wiring(data_dir, settings, pnpm_exe, on_progress)?;
     Ok(updated)
 }
 
@@ -1487,7 +1726,7 @@ pub fn uninstall(
     }
     let _ = fs::remove_dir_all(store_plugin_dir(data_dir, id));
     remove_item(data_dir, id)?;
-    let _ = ensure_wiring(data_dir, settings, pnpm_exe, on_progress);
+    ensure_wiring(data_dir, settings, pnpm_exe, on_progress)?;
     Ok(())
 }
 
@@ -1511,7 +1750,7 @@ pub fn set_mode(
         install_store_deps(data_dir, pnpm_exe, id, on_progress)?;
     }
     sync_kernels(data_dir, &item)?;
-    let _ = ensure_wiring(data_dir, settings, pnpm_exe, on_progress);
+    ensure_wiring(data_dir, settings, pnpm_exe, on_progress)?;
     Ok(())
 }
 
@@ -1709,6 +1948,80 @@ mod tests {
     }
 
     #[test]
+    fn validate_plugin_checks_the_load_contract() {
+        let home = TestHome::new();
+        let dir = home.0.join("plugin");
+        fs::create_dir_all(&dir).expect("plugin dir");
+
+        // 没有 package.json：拒绝
+        assert!(validate_plugin(&dir).is_err());
+
+        // bundle 层声明了 patch 但文件缺失：拒绝
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .expect("manifest");
+        assert!(validate_plugin(&dir).is_err());
+
+        // patch 文件补齐：放行
+        fs::write(dir.join("cordis.patch.yml"), "patches: []\n").expect("patch");
+        assert!(validate_plugin(&dir).is_ok());
+
+        // 普通依赖型插件：main 指向真实文件才放行
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","main":"lib/index.js"}"#,
+        )
+        .expect("manifest");
+        assert!(validate_plugin(&dir).is_err());
+        fs::create_dir_all(dir.join("lib")).expect("lib");
+        fs::write(dir.join("lib/index.js"), "module.exports = {}\n").expect("entry");
+        assert!(validate_plugin(&dir).is_ok());
+
+        // exports 入口存在即放行（Node 自己解析其目标）
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","exports":"./lib/index.js"}"#,
+        )
+        .expect("manifest");
+        assert!(validate_plugin(&dir).is_ok());
+
+        // 既无 bundle 也无入口：拒绝
+        fs::write(dir.join("package.json"), r#"{"name":"p"}"#).expect("manifest");
+        assert!(validate_plugin(&dir).is_err());
+    }
+
+    #[test]
+    fn hub_entry_normalizes_to_catalog_item() {
+        let raw: HubRaw = serde_json::from_str(
+            r#"{"s":"modlens","o":"liustack","n":"modlens","vr":"v3.22.1","c":"tools",
+                "t":["vision"],"d":"desc","r":"liustack/modlens","v":"verified",
+                "u":"2026-08-20T20:05:55Z","sg":3497,"fk":95}"#,
+        )
+        .expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "git");
+        assert_eq!(item.spec, "https://github.com/liustack/modlens.git");
+        assert_eq!(item.version, "v3.22.1");
+        assert_eq!(item.stars, 3497);
+        assert_eq!(item.forks, 95);
+        assert!(item.verified);
+        assert_eq!(item.category, "tools");
+        assert_eq!(
+            item.detail_url,
+            "https://dsh-plugin.org/zh/plugins/liustack/modlens"
+        );
+
+        // 无 repo 的条目回退 npm 安装
+        let raw: HubRaw = serde_json::from_str(r#"{"n":"pkg","d":"x"}"#).expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "npm");
+        assert_eq!(item.spec, "pkg");
+        assert!(!item.verified);
+    }
+
+    #[test]
     fn parses_git_specs() {
         let url = parse_spec("https://github.com/losebird/dsh-plugin-market").unwrap();
         assert_eq!(url.origin, "git");
@@ -1748,6 +2061,13 @@ mod tests {
             cmp_versions("1.2.3-alpha.1", "1.2.3-alpha.2"),
             Ordering::Less
         );
+        // HEAD hash vs a semver tag: the semver parses as [n,n,n] and the
+        // hash parses as empty, so the hash sorts as Less — i.e. `latest =
+        // "0.16.0"` reports as newer than `installed = "head"`.  The fix in
+        // `update()` clears `latest_version` after install so this comparison
+        // never runs against a stale semver.
+        assert_eq!(cmp_versions("0.16.0", "head"), Ordering::Greater);
+        assert_eq!(cmp_versions("head", "head"), Ordering::Equal);
     }
 
     #[test]

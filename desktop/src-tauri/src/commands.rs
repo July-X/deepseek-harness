@@ -216,17 +216,34 @@ pub fn start_kernel(state: State<'_, AppState>) -> Result<u16, String> {
     let settings = settings::load(&data_dir);
     let _ = plugins::ensure_wiring_quiet(&data_dir, &settings);
     if let Some(child) = kernel::start_maybe(&data_dir, &node_path).map_err(|e| e.to_string())? {
+        kernel::write_pid(&data_dir, child.id());
         crate::lock(&state.running).replace(child);
     }
     Ok(settings.port)
 }
 
+/// Stop the kernel and close the harness window, so the UI's「关闭工作台」
+/// tears down the whole workbench rather than leaving a dead webview behind.
+/// When the shell restarted since it spawned the kernel, the in-memory child
+/// is gone but the pid file still names the process to reap.
 #[tauri::command]
-pub fn stop_kernel(state: State<'_, AppState>) -> Result<(), String> {
+pub fn stop_kernel(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("harness") {
+        let _ = window.close();
+    }
     let mut guard = crate::lock(&state.running);
     if let Some(mut child) = guard.take() {
         kernel::stop(&mut child).map_err(|e| e.to_string())?;
     }
+    drop(guard);
+    let data_dir = state.data_dir.clone();
+    let port = settings::load(&data_dir).port;
+    if kernel::port_open(port) {
+        if let Some(pid) = kernel::read_pid(&data_dir) {
+            kernel::kill_pid(pid);
+        }
+    }
+    kernel::clear_pid(&data_dir);
     Ok(())
 }
 
@@ -243,7 +260,7 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
     let settings = settings::load(&data_dir);
     if !kernel::port_open(settings.port) {
         return Err(format!(
-            "内核未在运行（端口 {}），请先点击“启动内核”",
+            "内核未在运行（端口 {}），请先点击「启动工作台」",
             settings.port
         ));
     }
@@ -404,14 +421,15 @@ pub async fn plugin_check_updates(
         .map_err(|e| e.to_string())
 }
 
-/// Search the community catalog (cached fetch of the reference market).
+/// The full community catalog; search and filtering happen in the UI over
+/// this cached list. `force` bypasses the cache window (「刷新目录」).
 #[tauri::command]
 pub async fn plugin_catalog(
     state: State<'_, AppState>,
-    query: String,
+    force: bool,
 ) -> Result<Vec<plugins::CatalogItem>, String> {
     let data_dir = state.data_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || plugins::catalog_search(&data_dir, &query))
+    tauri::async_runtime::spawn_blocking(move || plugins::catalog(&data_dir, force))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())

@@ -62,3 +62,26 @@ pub fn save(data_dir: &Path, settings: &Settings) -> Result<(), String> {
     let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     fs::write(&path, text).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The UI sends only `{port, profile}`; Tauri deserializes the `settings`
+    /// arg with serde_json::from_value just like this.
+    #[test]
+    fn ui_payload_deserializes() {
+        let v = serde_json::json!({"port": 8080, "profile": "web"});
+        let s: Settings = serde_json::from_value(v).unwrap();
+        assert_eq!(s.port, 8080);
+        assert_eq!(s.node_path, None);
+    }
+
+    /// Ports outside u16 are rejected at the IPC boundary; the UI validates
+    /// 1024–65535 before sending so the user gets an actionable message.
+    #[test]
+    fn out_of_range_port_rejected() {
+        let v = serde_json::json!({"port": 70000, "profile": "web"});
+        assert!(serde_json::from_value::<Settings>(v).is_err());
+    }
+}

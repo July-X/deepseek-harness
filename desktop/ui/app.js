@@ -95,18 +95,28 @@ function resetInstallLog() {
 
 const busyButtons = new Set();
 function setBusy(on) {
-  document.querySelectorAll('button').forEach((btn) => {
-    if (on) {
+  if (on) {
+    document.querySelectorAll('button').forEach((btn) => {
       if (!btn.dataset.wasDisabled) {
         btn.dataset.wasDisabled = String(btn.disabled);
       }
       btn.disabled = true;
       busyButtons.add(btn);
-    } else if (busyButtons.has(btn)) {
-      btn.disabled = btn.dataset.wasDisabled === 'true';
-      busyButtons.delete(btn);
-    }
+    });
+    return;
+  }
+  // Restore from the Set itself, not a fresh DOM query: panels re-render via
+  // innerHTML while busy, and the detached originals would stay in the Set
+  // forever, leaving busyButtons non-empty and every guarded button (including
+  // the workbench toggle) stuck disabled.
+  busyButtons.forEach((btn) => {
+    btn.disabled = btn.dataset.wasDisabled === 'true';
+    delete btn.dataset.wasDisabled;
   });
+  busyButtons.clear();
+  // The workbench buttons' disabled state is owned by syncWorkbenchButtons;
+  // recompute so a stale pre-busy snapshot cannot win over the real status.
+  syncWorkbenchButtons();
 }
 
 // --- rendering -------------------------------------------------------------
@@ -141,16 +151,57 @@ function renderStatus(view) {
     : '未检测到可用 Node（' + node.reason + '）';
   $('kernelHome').textContent = kernel.dsh_home;
 
-  $('updateActive').textContent = kernel.active || '（未选择）';
-  $('updateRunning').textContent = kernel.running ? '运行中' : '未运行';
   $('updateInstalled').textContent = String((kernel.installed || []).length) + ' 个';
 
-  $('setPort').value = String(settings.port);
-  $('setProfile').value = settings.profile || '';
+  // The status poll re-renders every 2.5s; never clobber a field the user
+  // is editing right now, or an in-flight edit would silently revert.
+  if (document.activeElement !== $('setPort')) {
+    $('setPort').value = String(settings.port);
+  }
+  if (document.activeElement !== $('setProfile')) {
+    $('setProfile').value = settings.profile || '';
+  }
 
   $('nodeHint').textContent = node.ok
     ? 'node ' + node.version + ' 满足 dsh 要求（^22.19 || >=24）'
     : node.reason;
+
+  syncWorkbenchButtons();
+}
+
+// --- workbench toggle state machine -----------------------------------------
+//
+// The kernel is an implementation detail of the workbench: one toggle button
+// orchestrates start (kernel + wait-ready + open window) and stop (window +
+// kernel). `starting` marks the local orchestration window between the click
+// and the port answering; the 2.5s status poll keeps calling this so buttons
+// track real state without clobbering the in-flight "正在启动…" phase.
+
+let starting = false;
+
+function syncWorkbenchButtons() {
+  const k = currentView && currentView.kernel;
+  const toggle = $('btnToggle');
+  // The toggle carries an SVG icon, so the label span owns the text.
+  const toggleLabel = $('btnToggleLabel');
+  const openWindow = $('btnOpenWindow');
+  const hint = $('startHint');
+  const busy = busyButtons.size > 0;
+  const running = Boolean(k && k.running);
+  const canStart = Boolean(k && k.active && k.active_installed);
+
+  if (starting) {
+    toggle.disabled = true;
+    toggleLabel.textContent = '正在启动…';
+  } else if (running) {
+    toggle.disabled = busy;
+    toggleLabel.textContent = '关闭工作台';
+  } else {
+    toggle.disabled = !canStart || busy;
+    toggleLabel.textContent = '启动工作台';
+  }
+  openWindow.disabled = !running || starting || busy;
+  hint.classList.toggle('hidden', starting || running || canStart);
 }
 
 function badgeFor(version) {
@@ -390,32 +441,99 @@ function activateVersion(version) {
     .finally(() => setBusy(false));
 }
 
-function startKernel() {
-  setBusy(true);
+// Poll until the kernel port answers; start_kernel returns right after spawn,
+// so readiness can only be observed through get_status.
+const START_TIMEOUT_MS = 60000;
+
+function waitForRunning(deadline) {
+  return invoke('get_status').then((view) => {
+    renderStatus(view);
+    if (view.kernel.running) {
+      return true;
+    }
+    if (Date.now() > deadline) {
+      return false;
+    }
+    return new Promise((resolve) => setTimeout(resolve, 1000)).then(() => waitForRunning(deadline));
+  });
+}
+
+function startWorkbench() {
+  starting = true;
+  syncWorkbenchButtons();
   invoke('start_kernel')
-    .then(() => {
-      toast('内核已启动');
-      return refreshAll();
+    .then(() => waitForRunning(Date.now() + START_TIMEOUT_MS))
+    .then((ready) => {
+      if (!ready) {
+        throw new Error('等待内核就绪超时（' + START_TIMEOUT_MS / 1000 + ' 秒），详情见日志');
+      }
+      return invoke('open_harness');
     })
-    .catch((e) => toast('启动失败：' + e, 6000))
-    .finally(() => setBusy(false));
+    .then(() => toast('工作台已启动'))
+    .catch((e) => {
+      toast('启动失败：' + e, 8000);
+      // 失败路径的出口：直接展示日志，无需用户再找入口。
+      showLogs();
+    })
+    .finally(() => {
+      starting = false;
+      refreshAll();
+    });
 }
 
-function stopKernel() {
-  setBusy(true);
-  invoke('stop_kernel')
-    .then(() => {
-      toast('内核已停止');
-      return refreshAll();
-    })
-    .catch((e) => toast('停止失败：' + e, 5000))
-    .finally(() => setBusy(false));
+// 自绘确认框（WKWebView 无原生 confirm）。同时只允许一个待决确认。
+let confirmResolve = null;
+
+function confirmDialog(title, text, okLabel) {
+  $('confirmTitle').textContent = title;
+  $('confirmText').textContent = text;
+  $('btnConfirmOk').textContent = okLabel || '确认';
+  $('confirmModal').classList.remove('hidden');
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+  });
 }
 
-function openHarness() {
-  invoke('open_harness')
-    .then(() => {})
-    .catch((e) => toast('无法打开工作台：' + e, 5000));
+function settleConfirm(ok) {
+  $('confirmModal').classList.add('hidden');
+  if (confirmResolve) {
+    const resolve = confirmResolve;
+    confirmResolve = null;
+    resolve(ok);
+  }
+}
+
+function stopWorkbench() {
+  const proceed = () => {
+    setBusy(true);
+    invoke('stop_kernel')
+      .then(() => {
+        toast('工作台已关闭');
+        return refreshAll();
+      })
+      .catch((e) => toast('关闭失败：' + e, 5000))
+      .finally(() => setBusy(false));
+  };
+  const running = currentView && currentView.kernel && currentView.kernel.running;
+  if (!running) {
+    // 内核未运行：只是关掉残留的工作台窗口，无需确认
+    proceed();
+    return;
+  }
+  // 运行中才确认：内核可能正在思考，停止会中断未完成的回复
+  confirmDialog(
+    '确认停止内核？',
+    '内核正在运行。如果它正在思考或处理任务，停止将中断未完成的回复。',
+    '停止内核'
+  ).then((ok) => {
+    if (ok) {
+      proceed();
+    }
+  });
+}
+
+function openHarnessWindow() {
+  invoke('open_harness').catch((e) => toast('无法打开工作台窗口：' + e, 5000));
 }
 
 function showLogs() {
@@ -445,14 +563,21 @@ function detectNode() {
 }
 
 function saveSettings() {
+  const portRaw = $('setPort').value.trim();
+  const port = Number(portRaw);
+  if (!/^\d+$/.test(portRaw) || port < 1024 || port > 65535) {
+    toast('端口需为 1024–65535 的整数，当前输入：' + (portRaw || '（空）'), 5000);
+    return;
+  }
+  const profile = $('setProfile').value.trim();
   const settings = {
-    port: parseInt($('setPort').value, 10) || 3080,
-    profile: $('setProfile').value.trim() || 'web',
+    port,
+    profile: profile || 'web',
   };
   setBusy(true);
   invoke('save_settings', { settings })
     .then(() => {
-      toast('设置已保存');
+      toast('设置已保存（重启内核后生效）');
       return refreshAll();
     })
     .catch((e) => toast('保存失败：' + e, 5000))
@@ -462,14 +587,38 @@ function saveSettings() {
 // --- wiring -----------------------------------------------------------------
 
 $('btnRefresh').addEventListener('click', checkUpdates);
-$('btnStart').addEventListener('click', startKernel);
-$('btnStop').addEventListener('click', stopKernel);
-$('btnOpen').addEventListener('click', openHarness);
+$('btnToggle').addEventListener('click', () => {
+  const k = currentView && currentView.kernel;
+  if (k && k.running) {
+    stopWorkbench();
+  } else {
+    startWorkbench();
+  }
+});
+$('btnOpenWindow').addEventListener('click', openHarnessWindow);
 $('btnLogs').addEventListener('click', showLogs);
 $('btnLogClose').addEventListener('click', hideLogs);
+$('btnConfirmOk').addEventListener('click', () => settleConfirm(true));
+$('btnConfirmCancel').addEventListener('click', () => settleConfirm(false));
 $('btnDetectNode').addEventListener('click', detectNode);
 $('btnSaveSettings').addEventListener('click', saveSettings);
 $('btnProgressClose').addEventListener('click', closeProgress);
+
+// --- menu navigation --------------------------------------------------------
+//
+// The sidebar menu switches between panels by toggling .hidden; all panels
+// stay in the DOM so their element ids keep working for render functions.
+
+document.querySelectorAll('.menu-item').forEach((item) => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.menu-item').forEach((m) => {
+      m.classList.toggle('active', m === item);
+    });
+    document.querySelectorAll('.panel').forEach((p) => {
+      p.classList.toggle('hidden', p.id !== item.dataset.panel);
+    });
+  });
+});
 
 // Status auto-refresh while a kernel may be coming up.
 let lastRunning = false;
@@ -482,7 +631,8 @@ setInterval(() => {
       const changed = view.kernel.running !== lastRunning;
       lastRunning = view.kernel.running;
       renderStatus(view);
-      if (changed && view.kernel.running) {
+      // 启动编排自己会 toast「工作台已启动」，这里只提示外部来源的就绪。
+      if (changed && view.kernel.running && !starting) {
         toast('内核已就绪', 2500);
       }
     })

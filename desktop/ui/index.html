@@ -7,145 +7,271 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="logo" aria-hidden="true">
-        <img src="whale-icon.png" alt="" width="32" height="32" />
-      </span>
-      <div>
-        <h1>DeepSeek Harness 桌面端</h1>
-        <p class="subtitle">内核版本管理与本地工作台</p>
-      </div>
-    </div>
-    <div class="status-pill" id="statusPill">
-      <span class="dot" id="statusDot"></span>
-      <span id="statusText">加载中…</span>
-    </div>
-  </header>
+  <!-- Inline SVG sprite: zero-build page, so icons ship as stroke symbols
+       referenced via <use href="#i-…">; stroke/fill come from the .icon CSS. -->
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="i-dashboard" viewBox="0 0 24 24">
+      <rect x="3" y="3" width="7" height="9" rx="1" />
+      <rect x="14" y="3" width="7" height="5" rx="1" />
+      <rect x="14" y="12" width="7" height="9" rx="1" />
+      <rect x="3" y="16" width="7" height="5" rx="1" />
+    </symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24">
+      <path d="M12 2 2 7l10 5 10-5-10-5z" />
+      <path d="M2 17l10 5 10-5" />
+      <path d="M2 12l10 5 10-5" />
+    </symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24">
+      <path d="M9 7V3M15 7V3" />
+      <path d="M7 7h10v4a5 5 0 0 1-10 0V7z" />
+      <path d="M12 16v5" />
+    </symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24">
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </symbol>
+    <symbol id="i-power" viewBox="0 0 24 24">
+      <path d="M18.36 6.64a9 9 0 1 1-12.72 0" />
+      <line x1="12" y1="2" x2="12" y2="12" />
+    </symbol>
+    <symbol id="i-external" viewBox="0 0 24 24">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+      <polyline points="15 3 21 3 21 9" />
+      <line x1="10" y1="14" x2="21" y2="3" />
+    </symbol>
+    <symbol id="i-file-text" viewBox="0 0 24 24">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="16" y1="13" x2="8" y2="13" />
+      <line x1="16" y1="17" x2="8" y2="17" />
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24">
+      <polyline points="23 4 23 10 17 10" />
+      <polyline points="1 20 1 14 7 14" />
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+    </symbol>
+    <symbol id="i-sync" viewBox="0 0 24 24">
+      <polyline points="17 1 21 5 17 9" />
+      <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+      <polyline points="7 23 3 19 7 15" />
+      <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+    </symbol>
+    <symbol id="i-download" viewBox="0 0 24 24">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24">
+      <polyline points="20 6 9 17 4 12" />
+    </symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24">
+      <polyline points="6 9 12 15 18 9" />
+    </symbol>
+    <symbol id="i-x" viewBox="0 0 24 24">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </symbol>
+  </svg>
 
-  <main>
-    <div class="row-top">
-    <section class="card" id="cardStatus">
-      <h2>当前内核</h2>
-      <dl class="kv">
-        <dt>运行状态</dt>
-        <dd id="kernelRunning">—</dd>
-        <dt>活动版本</dt>
-        <dd id="kernelActive">—</dd>
-        <dt>工作台地址</dt>
-        <dd id="kernelUrl">—</dd>
-        <dt>Node.js</dt>
-        <dd id="kernelNode">—</dd>
-        <dt>内核数据目录（dsh home）</dt>
-        <dd id="kernelHome">—</dd>
-      </dl>
-      <div class="btn-row">
-        <button id="btnStart" type="button">启动内核</button>
-        <button id="btnStop" type="button">停止内核</button>
-        <button id="btnOpen" type="button">打开工作台</button>
-        <button id="btnLogs" type="button" class="ghost">查看日志</button>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="whale-icon.png" alt="" width="128" height="128" />
+        <div>
+          <h2>DeepSeek Harness</h2>
+          <p class="subtitle">桌面管理台</p>
+        </div>
       </div>
-    </section>
+      <nav class="menu" aria-label="主菜单">
+        <button type="button" class="menu-item active" data-panel="panelOverview">
+          <svg class="icon"><use href="#i-dashboard" /></svg><span>概览</span>
+        </button>
+        <button type="button" class="menu-item" data-panel="panelVersions">
+          <svg class="icon"><use href="#i-layers" /></svg><span>内核版本</span>
+        </button>
+        <button type="button" class="menu-item" data-panel="panelPlugins">
+          <svg class="icon"><use href="#i-plug" /></svg>
+          <span>插件</span>
+          <span id="pluginUpdateBadge" class="badge hidden"></span>
+        </button>
+        <button type="button" class="menu-item" data-panel="panelSettings">
+          <svg class="icon"><use href="#i-sliders" /></svg><span>设置</span>
+        </button>
+      </nav>
+      <div class="status-pill" id="statusPill">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">加载中…</span>
+      </div>
+    </aside>
 
-    <section class="card" id="cardSettings">
-      <h2>设置</h2>
-      <div class="btn-row">
-        <button id="btnDetectNode" type="button" class="ghost">自动检测 node</button>
-      </div>
-      <label>
-        Web UI 端口
-        <input id="setPort" type="number" min="1024" max="65535" value="3080" />
-      </label>
-      <label>
-        插件接线 profile 名
-        <input id="setProfile" placeholder="web" spellcheck="false" />
-      </label>
-      <div class="btn-row">
-        <button id="btnSaveSettings" type="button">保存设置</button>
-      </div>
-      <p id="nodeHint" class="muted"></p>
-    </section>
-    </div>
-
-    <section class="card" id="cardUpdates">
-      <div class="card-head">
-        <h2>内核更新</h2>
-        <button id="btnRefresh" type="button" class="ghost">检查更新</button>
-      </div>
-      <div class="updates-body">
-        <div class="updates-info">
-          <p class="muted">
-            根据 npm registry 上的 <code>@deepseek-ai/dsh</code>
-            包（<a href="https://www.npmjs.com/package/@deepseek-ai/dsh">@deepseek-ai/dsh</a>）
-            下载并替换内核。
-          </p>
-          <div id="releaseWarning" class="warning hidden"></div>
-          <h3>当前内核</h3>
+    <main>
+      <!-- 概览：当前内核状态与启停操作 -->
+      <section class="panel" id="panelOverview">
+        <div class="card" id="cardStatus">
+          <h2>当前内核</h2>
           <dl class="kv">
-            <dt>活动版本</dt>
-            <dd id="updateActive">—</dd>
             <dt>运行状态</dt>
-            <dd id="updateRunning">—</dd>
-            <dt>已安装版本</dt>
-            <dd id="updateInstalled">—</dd>
+            <dd id="kernelRunning">—</dd>
+            <dt>活动版本</dt>
+            <dd id="kernelActive">—</dd>
+            <dt>工作台地址</dt>
+            <dd id="kernelUrl">—</dd>
+            <dt>Node.js</dt>
+            <dd id="kernelNode">—</dd>
+            <dt>数据目录</dt>
+            <dd id="kernelHome">—</dd>
           </dl>
-        </div>
-        <div class="updates-lists">
-          <div class="list-group">
-            <h3>已安装</h3>
-            <div id="installedList" class="installed-list">
-              <p class="muted">尚未安装任何内核。</p>
-            </div>
+          <div class="btn-row">
+            <button id="btnToggle" type="button">
+              <svg class="icon"><use href="#i-power" /></svg><span id="btnToggleLabel">启动工作台</span>
+            </button>
+            <button id="btnOpenWindow" type="button" class="ghost">
+              <svg class="icon"><use href="#i-external" /></svg><span>打开工作台窗口</span>
+            </button>
+            <button id="btnLogs" type="button" class="ghost">
+              <svg class="icon"><use href="#i-file-text" /></svg><span>查看日志</span>
+            </button>
           </div>
-          <div class="list-group">
-            <h3>npm 上的发布</h3>
-            <div id="releaseList" class="release-list">
-              <p class="muted">点击「检查更新」从 npm registry 拉取版本列表。</p>
-            </div>
-          </div>
+          <p id="startHint" class="muted hidden">尚未安装可用内核，请先到「内核版本」页安装。</p>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section class="card" id="cardPlugins">
-      <div class="card-head">
-        <h2>插件管理</h2>
-        <span id="pluginUpdateBadge" class="badge hidden"></span>
-        <button id="btnPluginCheck" type="button" class="ghost">检查更新</button>
-      </div>
-      <p class="muted">
-        社区插件统一存放在 <code>~/.dsh/plugins/</code>，以<strong>链接</strong>或<strong>复制</strong>的方式进入每个内核，
-        切换内核无需重新安装。安装来源支持 npm 包名（含
-        <code>@scope</code>）与 GitHub 仓库 URL（<code>#tag</code> 可锁定版本）。
-        浏览入口：<a href="https://github.com/topics/dsh-plugin">dsh-plugin</a>。
-      </p>
-      <div id="pluginWarning" class="warning hidden"></div>
-      <h3>已安装</h3>
-      <div id="pluginList" class="installed-list">
-        <p class="muted">尚未安装任何插件。</p>
-      </div>
-      <h3>安装插件</h3>
-      <div class="install-row">
-        <input id="pluginSpec" placeholder="npm 包名（@scope/name）或 GitHub 仓库 URL" spellcheck="false" />
-        <select id="pluginMode" title="物化模式">
-          <option value="link">链接模式（默认）</option>
-          <option value="copy">复制模式</option>
-        </select>
-        <button id="btnPluginInstall" type="button">安装</button>
-      </div>
-      <div class="btn-row">
-        <button id="btnPluginSync" type="button" class="ghost">同步到所有内核</button>
-      </div>
-      <h3>社区目录</h3>
-      <div class="install-row">
-        <input id="catalogQuery" placeholder="按名称/描述搜索社区插件，如 skin / skill / memory" spellcheck="false" />
-        <button id="btnCatalogSearch" type="button" class="ghost">搜索</button>
-      </div>
-      <div id="catalogList" class="release-list">
-        <p class="muted">输入关键词搜索社区目录（数据来自 losebird/dsh-plugin-market）。</p>
-      </div>
-    </section>
-  </main>
+      <!-- 内核版本：已安装列表与 npm 发布 -->
+      <section class="panel hidden" id="panelVersions">
+        <div class="card" id="cardUpdates">
+          <div class="card-head">
+            <h2>内核版本</h2>
+            <span class="head-meta">
+              <span class="muted">已安装 <span id="updateInstalled">—</span></span>
+              <button id="btnRefresh" type="button" class="ghost">
+                <svg class="icon"><use href="#i-refresh" /></svg><span>检查更新</span>
+              </button>
+            </span>
+          </div>
+          <div id="releaseWarning" class="warning hidden"></div>
+          <div class="updates-lists">
+            <div class="list-group">
+              <h3>已安装</h3>
+              <div id="installedList" class="installed-list">
+                <p class="muted">尚未安装任何内核。</p>
+              </div>
+            </div>
+            <div class="list-group">
+              <h3>npm 发布</h3>
+              <div id="releaseList" class="release-list">
+                <p class="muted">点击「检查更新」从 npm registry 拉取版本列表。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 插件：已安装列表、手动安装与插件中心 -->
+      <section class="panel hidden" id="panelPlugins">
+        <div class="card" id="cardPlugins">
+          <div class="card-head">
+            <h2>已安装</h2>
+            <span class="head-meta">
+              <button id="btnPluginSync" type="button" class="ghost">
+                <svg class="icon"><use href="#i-sync" /></svg><span>同步到所有内核</span>
+              </button>
+              <button id="btnPluginCheck" type="button" class="ghost">
+                <svg class="icon"><use href="#i-refresh" /></svg><span>检查更新</span>
+              </button>
+            </span>
+          </div>
+          <p class="muted">
+            插件统一存放于 <code>~/.dsh/plugins/</code>，切换内核无需重装；安装完成后自动校验是否符合
+            dsh 插件规范，内核重启后生效。
+          </p>
+          <div id="pluginWarning" class="warning hidden"></div>
+          <div id="pluginList" class="installed-list">
+            <p class="muted">尚未安装任何插件。</p>
+          </div>
+          <h3>手动安装</h3>
+          <div class="install-row">
+            <input id="pluginSpec" type="text" placeholder="npm 包名（@scope/name）或 GitHub 仓库 URL" spellcheck="false" />
+            <select id="pluginMode" title="物化模式">
+              <option value="link">链接（默认）</option>
+              <option value="copy">复制</option>
+            </select>
+            <button id="btnPluginInstall" type="button">
+              <svg class="icon"><use href="#i-download" /></svg><span>安装</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="card" id="cardCatalog">
+          <div class="card-head">
+            <h2>插件中心</h2>
+            <span class="head-meta">
+              <span id="catalogCount" class="muted"></span>
+              <button id="btnCatalogReload" type="button" class="ghost">
+                <svg class="icon"><use href="#i-refresh" /></svg><span>刷新目录</span>
+              </button>
+            </span>
+          </div>
+          <p class="muted">
+            来自 <a href="https://dsh-plugin.org" target="_blank" rel="noreferrer">dsh-plugin.org</a>
+            社区目录，点击「安装」即可装到本机插件库并接入所有内核。
+          </p>
+          <div class="install-row">
+            <input id="catalogQuery" type="text" placeholder="搜索插件名称、描述、标签…" spellcheck="false" />
+            <select id="catalogSort" title="排序">
+              <option value="stars">Star 最多</option>
+              <option value="updated">最近更新</option>
+            </select>
+            <select id="catalogFilter" title="安装状态">
+              <option value="all">全部</option>
+              <option value="installed">已安装</option>
+              <option value="not-installed">未安装</option>
+            </select>
+          </div>
+          <div id="catalogCats" class="catalog-cats"></div>
+          <div id="catalogList" class="catalog-list"></div>
+          <div class="catalog-more">
+            <button id="btnCatalogMore" type="button" class="ghost hidden">
+              <svg class="icon"><use href="#i-chevron-down" /></svg><span>显示更多</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 设置：端口、profile 与 Node 检测 -->
+      <section class="panel hidden" id="panelSettings">
+        <div class="card" id="cardSettings">
+          <h2>设置</h2>
+          <label>
+            Web UI 端口
+            <input id="setPort" type="number" min="1024" max="65535" value="3080" />
+          </label>
+          <label>
+            插件接线 profile 名
+            <input id="setProfile" type="text" placeholder="web" spellcheck="false" />
+          </label>
+          <div class="btn-row">
+            <button id="btnSaveSettings" type="button">
+              <svg class="icon"><use href="#i-check" /></svg><span>保存设置</span>
+            </button>
+            <button id="btnDetectNode" type="button" class="ghost">
+              <svg class="icon"><use href="#i-activity" /></svg><span>检测 Node.js</span>
+            </button>
+          </div>
+          <p id="nodeHint" class="muted"></p>
+        </div>
+      </section>
+    </main>
+  </div>
 
   <div id="toast" class="toast hidden" role="status"></div>
 
@@ -157,7 +283,9 @@
         <pre id="installLogText"></pre>
       </div>
       <div class="btn-row hidden" id="progressActions">
-        <button id="btnProgressClose" type="button">关闭</button>
+        <button id="btnProgressClose" type="button">
+          <svg class="icon"><use href="#i-x" /></svg><span>关闭</span>
+        </button>
       </div>
     </div>
   </div>
@@ -166,9 +294,25 @@
     <div class="modal-body">
       <div class="modal-head">
         <h2>内核日志</h2>
-        <button id="btnLogClose" type="button" class="ghost">关闭</button>
+        <button id="btnLogClose" type="button" class="ghost">
+          <svg class="icon"><use href="#i-x" /></svg><span>关闭</span>
+        </button>
       </div>
       <pre id="logContent"></pre>
+    </div>
+  </div>
+
+  <!-- WKWebView 没有原生 confirm()：自绘确认框，Promise 化 -->
+  <div id="confirmModal" class="modal hidden">
+    <div class="modal-body confirm-body">
+      <div class="modal-head">
+        <h2 id="confirmTitle">确认</h2>
+      </div>
+      <p id="confirmText" class="confirm-text"></p>
+      <div class="btn-row confirm-actions">
+        <button id="btnConfirmCancel" type="button" class="ghost">取消</button>
+        <button id="btnConfirmOk" type="button" class="danger">确认</button>
+      </div>
     </div>
   </div>
 

@@ -37,7 +37,7 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
   - 安装 = 在 `<data_dir>/kernels/<version>/` 写最小 stub `package.json` 后执行 `pnpm add --prefix … --ignore-workspace --config.node-linker=hoisted --reporter=append-only @deepseek-ai/dsh@<version>`。
   - `node-linker=hoisted` 保证 `node_modules` 扁平，内核入口固定为 `node_modules/@deepseek-ai/dsh/lib/bin.js`（`KERNEL_BIN_REL`）；改布局必须同步该常量与 `start()`。
   - `run_pnpm` 把 stdout/stderr 各用一个 drain 线程读入 mpsc channel，安装线程逐行回调 `on_progress` 并落盘日志——不要把两个管道放在同一线程顺序读取（会因管道缓冲区满而死锁）。
-- **plugins.rs**：社区插件管理——中央库 `~/.dsh/plugins/`（store.json + 插件源）、按内核物化（link 默认，失败降级 copy；元数据 `.meta/<id>.json`）、profile 接线（deps + `dsh.profile.bundles`，切换/启动时 `ensure_wiring_quiet` 校正）、更新检查（npm dist-tags / git ls-remote）、社区目录（losebird 市场 registry 缓存 6h）。设计见 `docs/plugin-management.md`。
+- **plugins.rs**：社区插件管理。详见下文「插件机制」一节。
 - **releases.rs**：npm registry 全量版本 + dist-tags；registry 不可达时回退 GitHub Releases API 与 Atom feed。
 - **node.rs**：Node 检测与 engines 校验（`^22.19 || >=24`）、pnpm 解析（显式配置 → node 同目录 → PATH）。
 - **settings.rs**：`settings.json` 平铺结构（`node_path` / `pnpm_path` / `port`），serde default 兼容缺字段。
@@ -46,9 +46,53 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
 
 外壳全部状态位于 `<dsh_home>/desktop/`（默认 `~/.dsh/desktop/`，`DSH_HOME` 可重定向），由 `kernel::data_dir` 统一解析并在启动时创建；`lib.rs` 的 `setup()` 必须通过它取目录——不要绕回 `app_data_dir()`。子结构：`kernels/<版本>/`、`logs/`、`settings.json`、`active.txt`。
 
+## 插件机制
+
+**布局**：
+
+```
+~/.dsh/
+├── plugins/<id>/            # 中央 store：git clone 或 npm 提取
+│   ├── package.json
+│   ├── lib/                 # TS 插件的 build 产物（pnpm install 时 prepare 触发）
+│   ├── node_modules/        # store 自身的依赖
+│   ├── pnpm-lock.yaml
+│   └── .npmrc               # 由 ensure_store_npmrc 写入（minimumReleaseAge=0）
+├── profiles/<name>/         # dsh profile（声明 bundle 列表 + 插件 link 依赖）
+│   ├── package.json         # {"dependencies":{"dsh-synapse":"link:../../desktop/..."}}
+│   ├── node_modules/<id> → ../../../desktop/.../<id>
+│   └── pnpm-workspace.yaml  # nodeLinker: hoisted, autoInstallPeers: false, minimumReleaseAge=0
+└── desktop/kernels/<version>/plugins/<id> → ~/.dsh/plugins/<id>  # materialize_one 写入
+                                               .meta/<id>.json      # mode + version + synced_at
+```
+
+**完整流程**（以 `install(spec)` 为例）：
+
+1. **fetch**：git clone（深度 1）或 npm tarball 解压到 `~/.dsh/plugins/<id>/`
+2. **ensure_store_npmrc**：写入 `~/.dsh/plugins/.npmrc`（`minimumReleaseAge=0`、固定 npm registry）—— pnpm v11 的 `minimumReleaseAgeExclude` 不支持通配符，必须直接关掉年龄检查
+3. **install_store_deps**：`pnpm install --ignore-workspace --config.node-linker=hoisted --reporter=append-only`
+   - 装依赖链 → 若有 `prepare` 脚本（`tsdown` / `tsc`）→ 触发构建 → `lib/` 就位
+   - 装前**先删旧 `pnpm-lock.yaml`**：避开历史 lockfile 的 `minimumReleaseAge` 失效条目
+4. **upsert_item**：写入 `~/.dsh/plugins/store.json`
+5. **sync_kernels**：每个已装内核调用 `materialize_one`：
+   - 解析 `resolved_source`（store 若本身是 symlink，展开到真实路径）
+   - 校验现有 `target` symlink 是否等于 `resolved_source`——不等就重建（修复历史 double-symlink 链）
+   - 调 `refresh_store_peers`：把内核 `node_modules/@deepseek-ai/*` 链接进 store 的 peer deps 解析路径
+6. **ensure_wiring**：写 profile 的 `package.json` + `pnpm install` 把 `link:` 依赖铺到 `profiles/<name>/node_modules/`
+
+**常见坑**：
+
+| 现象 | 根因 | 修复 |
+| --- | --- | --- |
+| `minimumReleaseAgeExclude` 通配符不生效 | pnpm 不支持通配符，必须 `package@version` 全列 | 改用 `minimumReleaseAge=0` |
+| `Cannot find module .../lib/index.js`（TS 插件） | `pnpm install` 没触发 `prepare` 构建 | 修好 `.npmrc` + 删除旧 lockfile 后重装 |
+| 内核 `node_modules/<id>` 看着对但解析失败 | store 若本身是 symlink，套一层形成 double-symlink | `materialize_one` `read_link` store，链上一个跳转 |
+| 重启后 `pnpm install` 报 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` | 旧 lockfile 过期条目 | `install_store_deps` 先删 lockfile 再 re-resolve |
+
 ## 约定
 
 - 用户可见文案用简体中文；错误信息必须包含可操作的下一步（如缺失依赖时给出安装指引）与相关日志路径。
+- 工作台 UX：内核是实现细节，概览页只暴露「启动工作台 / 关闭工作台」单按钮状态机（启动 = 拉起内核 + 轮询等待就绪 + 自动打开窗口；失败自动弹出内核日志）；「打开工作台窗口」「查看日志」是次级 ghost 入口。新增用户可见操作时不要把内核生命周期拆成独立按钮。
 - 长任务失败时进度面板保持打开并展示错误与日志区，用户手动点击「关闭」才收起——不要在 catch 后自动隐藏面板。
 - 日志双轨：UI 只显示有限行数的实时流（ANSI 转义在前端剥离）；完整原始输出始终落盘 `<data_dir>/logs/install-<version>.log` 与 `kernel.log`。报错信息引用日志路径。
 - 应用图标以 `assets/whale-icon-512.png` 为母版，用 `./node_modules/.bin/tauri icon assets/whale-icon-512.png -o src-tauri/icons` 再生成全套；只提交被 `tauri.conf.json` 引用的文件（icon.icns/icon.ico/32x32/128x128/128x128@2x）。改图标后重启应用，Dock 图标缓存才会刷新。

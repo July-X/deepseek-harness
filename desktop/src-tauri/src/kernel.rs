@@ -242,7 +242,7 @@ pub fn install_version(
         "--reporter=append-only",
         spec.as_str(),
     ];
-    let status = run_pnpm(pnpm_exe, &args, &log_path, &mut on_progress).map_err(|e| {
+    let status = run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut on_progress).map_err(|e| {
         AppError::Io(format!(
             "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
         ))
@@ -289,6 +289,7 @@ pub fn install_version(
 pub(crate) fn run_pnpm(
     pnpm_exe: &Path,
     args: &[&str],
+    cwd: &Path,
     log_path: &Path,
     mut on_progress: impl FnMut(&str),
 ) -> io::Result<std::process::ExitStatus> {
@@ -306,6 +307,10 @@ pub(crate) fn run_pnpm(
         let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
         let mut cmd = Command::new(comspec);
         cmd.arg("/C").arg(pnpm_exe).args(args);
+        // pnpm install resolves the nearest package.json upward from cwd: a
+        // GUI shell starts with an arbitrary cwd, so it must be set
+        // explicitly or the install lands in the wrong directory.
+        cmd.current_dir(cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         cmd.spawn()?
     };
@@ -313,6 +318,7 @@ pub(crate) fn run_pnpm(
     let mut child = {
         let mut cmd = Command::new(pnpm_exe);
         cmd.args(args);
+        cmd.current_dir(cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         cmd.spawn()?
     };
@@ -460,4 +466,75 @@ pub fn stop(child: &mut Child) -> Result<(), AppError> {
         let _ = child.wait();
     }
     Ok(())
+}
+
+// --- pid tracking -----------------------------------------------------------
+//
+// The shell's in-memory `running` child is lost when the shell itself
+// restarts. The pid file lets a later「停止内核」still reap the kernel.
+
+/// PID file of the last kernel the shell spawned: `<data_dir>/kernel.pid`.
+fn pid_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("kernel.pid")
+}
+
+/// Record the spawned kernel's pid (best-effort).
+pub fn write_pid(data_dir: &Path, pid: u32) {
+    let _ = fs::write(pid_path(data_dir), pid.to_string());
+}
+
+/// Read the recorded kernel pid, when present and parseable.
+pub fn read_pid(data_dir: &Path) -> Option<u32> {
+    fs::read_to_string(pid_path(data_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Drop the pid record after a successful stop.
+pub fn clear_pid(data_dir: &Path) {
+    let _ = fs::remove_file(pid_path(data_dir));
+}
+
+/// Whether the process behind `pid` looks like a kernel the shell spawned,
+/// guarding against killing an unrelated process after pid reuse.
+#[cfg(unix)]
+fn pid_is_kernel(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("@deepseek-ai/dsh/lib/bin.js"))
+        .unwrap_or(false)
+}
+
+/// Kill a tracked-out kernel by pid: TERM the process group, then KILL
+/// whatever survives. No-op when the pid is gone or is not a kernel.
+pub fn kill_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        if !pid_is_kernel(pid) {
+            return;
+        }
+        let pgid = pid as i32; // start() setsid()s, so the child leads its group
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(100));
+            let alive = unsafe { libc::kill(-pgid, 0) } == 0;
+            if !alive {
+                return;
+            }
+        }
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+    }
 }
