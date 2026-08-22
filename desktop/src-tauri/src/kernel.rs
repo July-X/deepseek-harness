@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use crate::process::quiet;
+
 use serde::Serialize;
 use tauri::Manager;
 
@@ -361,7 +363,7 @@ pub(crate) fn run_pnpm(
         // explicitly or the install lands in the wrong directory.
         cmd.current_dir(cwd);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.spawn()?
+        quiet(&mut cmd).spawn()?
     };
     #[cfg(not(windows))]
     let mut child = {
@@ -487,7 +489,10 @@ pub fn start(data_dir: &Path, node: &Path, version: &str, port: u16) -> Result<C
         }
     }
 
-    cmd.spawn()
+    // quiet() matters here too: the kernel is a long-running console app and
+    // would otherwise pin a visible terminal window for its whole lifetime.
+    quiet(&mut cmd)
+        .spawn()
         .map_err(|e| AppError::Io(format!("无法启动内核：{e}")))
 }
 
@@ -526,9 +531,9 @@ pub fn stop(child: &mut Child) -> Result<(), AppError> {
     #[cfg(windows)]
     {
         let pid = child.id().to_string();
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .status();
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid, "/T", "/F"]);
+        let _ = quiet(&mut cmd).status();
         let _ = child.wait();
     }
     Ok(())
@@ -599,8 +604,8 @@ pub fn kill_pid(pid: u32) {
     }
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status();
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        let _ = quiet(&mut cmd).status();
     }
 }

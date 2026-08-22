@@ -24,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::process::quiet;
 use crate::version::cmp_versions;
 use crate::{commands, kernel, settings};
 
@@ -510,7 +511,9 @@ fn latest_tag<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
 
 /// Run one command, collecting stdout for quick helpers (git ls-remote).
 fn run_capture(program: &str, args: &[&str]) -> io::Result<(bool, String)> {
-    let output = Command::new(program).args(args).output()?;
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    let output = quiet(&mut cmd).output()?;
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     Ok((output.status.success(), text))
 }
@@ -544,7 +547,8 @@ fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 /// Extract a tgz into dest, stripping the leading package/ segment. Uses the
 /// system tar (bsdtar on macOS/Windows, GNU tar elsewhere).
 fn extract_tarball(tarball: &Path, dest: &Path) -> Result<(), String> {
-    let status = Command::new("tar")
+    let mut cmd = Command::new("tar");
+    let status = quiet(&mut cmd)
         .arg("-xzf")
         .arg(tarball)
         .arg("--strip-components=1")
@@ -686,7 +690,9 @@ fn fetch_git(
     pnpm_exe: &Path,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<String, AppError> {
-    if Command::new("git").arg("--version").output().is_err() {
+    let mut probe = Command::new("git");
+    probe.arg("--version");
+    if quiet(&mut probe).output().is_err() {
         return Err(AppError::Plugin(
             "未找到 git（git 来源的插件需要 git；请先安装 git）".into(),
         ));
@@ -697,7 +703,7 @@ fn fetch_git(
     if let Some(tag) = &spec.pin {
         cmd.arg("--branch").arg(tag);
     }
-    let status = cmd
+    let status = quiet(&mut cmd)
         .arg(&spec.source)
         .arg(dest)
         .stdout(Stdio::null())

@@ -6,6 +6,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::process::quiet;
 use crate::settings::Settings;
 
 /// The engine range dsh declares (`^22.19.0 || >=24.0.0`).
@@ -46,7 +47,9 @@ fn compatible((major, minor, _patch): (u32, u32, u32)) -> bool {
 
 /// Ask a node executable for its version.
 pub fn version_of(path: &Path) -> Option<String> {
-    let output = Command::new(path).arg("--version").output().ok()?;
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    let output = quiet(&mut cmd).output().ok()?;
     if !output.status.success() {
         return None;
     }

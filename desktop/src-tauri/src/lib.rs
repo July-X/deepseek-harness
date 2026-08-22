@@ -10,6 +10,7 @@ mod error;
 mod kernel;
 mod node;
 mod plugins;
+mod process;
 mod releases;
 mod settings;
 mod version;
@@ -33,6 +34,7 @@ pub fn run() {
             app.manage(AppState {
                 data_dir,
                 running: Mutex::new(None),
+                node_cache: Mutex::new(None),
             });
             Ok(())
         })

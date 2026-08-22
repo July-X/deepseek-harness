@@ -22,6 +22,12 @@ use crate::{kernel, node, plugins, releases, settings};
 pub struct AppState {
     pub data_dir: PathBuf,
     pub running: Mutex<Option<Child>>,
+    /// Last resolved Node runtime, keyed by the configured node path. The
+    /// status poll runs every few seconds; re-probing `node --version` each
+    /// time would spawn a process per poll (slow on Windows, where process
+    /// creation is expensive) for a result that only changes with the
+    /// setting or the machine's Node install.
+    pub node_cache: Mutex<Option<(Option<String>, node::NodeInfo)>>,
 }
 
 /// Everything the management UI needs on the first render.
@@ -76,7 +82,7 @@ pub fn get_status(state: State<'_, AppState>) -> StatusView {
     let data_dir = state.data_dir.clone();
     let settings = settings::load(&data_dir);
     let kernel_status = kernel::status(&data_dir, &settings);
-    let node_info = node::resolve(&settings);
+    let node_info = cached_node(&state, &settings);
     let kernel_log = read_tail(&kernel::logs_dir(&data_dir).join("kernel.log"), 8 * 1024);
     StatusView {
         kernel: kernel_status,
@@ -84,6 +90,21 @@ pub fn get_status(state: State<'_, AppState>) -> StatusView {
         settings,
         kernel_log,
     }
+}
+
+/// Resolve the Node runtime through the per-app cache; only a changed
+/// `node_path` setting triggers a fresh probe.
+fn cached_node(state: &AppState, settings: &settings::Settings) -> node::NodeInfo {
+    let key = settings.node_path.clone();
+    let mut guard = crate::lock(&state.node_cache);
+    if let Some((cached_key, info)) = guard.as_ref() {
+        if *cached_key == key {
+            return info.clone();
+        }
+    }
+    let info = node::resolve(settings);
+    *guard = Some((key, info.clone()));
+    info
 }
 
 #[tauri::command]
