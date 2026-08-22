@@ -24,6 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::version::cmp_versions;
 use crate::{commands, kernel, settings};
 
 /// Default profile the shell wires plugins into (the kernel's web surface).
@@ -491,55 +492,7 @@ pub fn parse_spec(spec: &str) -> Result<PluginSpec, AppError> {
 }
 
 // --- version comparison -----------------------------------------------------
-
-/// Semver-ish comparison tolerant of the community's tag shapes: optional v
-/// prefix, dot-separated numeric core, optional prerelease after a dash.
-/// Release > prerelease; prerelease segments compare numerically when both
-/// numeric, lexically otherwise.
-pub fn cmp_versions(a: &str, b: &str) -> Ordering {
-    fn core(v: &str) -> (Vec<u64>, &str) {
-        let stripped = v.strip_prefix('v').unwrap_or(v);
-        let (head, pre) = stripped.split_once('-').unwrap_or((stripped, ""));
-        let nums: Vec<u64> = head
-            .split('.')
-            .filter_map(|s| s.parse::<u64>().ok())
-            .collect();
-        (nums, pre)
-    }
-    let (na, pa) = core(a);
-    let (nb, pb) = core(b);
-    let mut i = 0;
-    while i < na.len() && i < nb.len() {
-        match na[i].cmp(&nb[i]) {
-            Ordering::Equal => i += 1,
-            other => return other,
-        }
-    }
-    if na.len() != nb.len() {
-        return na.len().cmp(&nb.len());
-    }
-    match (pa.is_empty(), pb.is_empty()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater,
-        (false, true) => Ordering::Less,
-        (false, false) => {
-            let xa: Vec<&str> = pa.split('.').collect();
-            let ya: Vec<&str> = pb.split('.').collect();
-            for (xi, yi) in xa.iter().zip(ya.iter()) {
-                let ord = match (xi.parse::<u64>(), yi.parse::<u64>()) {
-                    (Ok(n), Ok(m)) => n.cmp(&m),
-                    (Ok(_), Err(_)) => Ordering::Greater,
-                    (Err(_), Ok(_)) => Ordering::Less,
-                    (Err(_), Err(_)) => xi.cmp(yi),
-                };
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-            }
-            xa.len().cmp(&ya.len())
-        }
-    }
-}
+// Shared with the kernel release list: crate::version::cmp_versions.
 
 /// Highest version among tag candidates, or None.
 fn latest_tag<'a>(tags: impl Iterator<Item = &'a str>) -> Option<String> {
@@ -619,8 +572,10 @@ fn write_source_marker(spec: &PluginSpec, version: &str, dest: &Path) -> Result<
 
 /// Fetch a plugin into the store under a fresh tmp dir, then atomically swap
 /// it into place. Returns the new store item, inheriting mode and latest.
+/// `pnpm_exe` builds git-sourced plugins whose committed tree lacks `lib/`.
 fn fetch_into_store(
     data_dir: &Path,
+    pnpm_exe: &Path,
     spec: &PluginSpec,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<StoreItem, AppError> {
@@ -632,7 +587,7 @@ fn fetch_into_store(
 
     let version = match spec.origin.as_str() {
         "npm" => fetch_npm(spec, &tmp, on_progress),
-        "git" => fetch_git(spec, &tmp, on_progress),
+        "git" => fetch_git(spec, &tmp, pnpm_exe, on_progress),
         other => Err(AppError::Plugin(format!("未知来源 {other:?}"))),
     };
     let version = match version {
@@ -728,6 +683,7 @@ fn fetch_npm(
 fn fetch_git(
     spec: &PluginSpec,
     dest: &Path,
+    pnpm_exe: &Path,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<String, AppError> {
     if Command::new("git").arg("--version").output().is_err() {
@@ -754,6 +710,7 @@ fn fetch_git(
             status.code()
         )));
     }
+    build_git_plugin(dest, pnpm_exe, on_progress)?;
     if let Some(tag) = &spec.pin {
         return Ok(tag.clone());
     }
@@ -765,6 +722,67 @@ fn fetch_git(
     } else {
         String::from("head")
     })
+}
+
+/// Build a git-sourced plugin right after cloning.
+///
+/// Git repos carry their build output in `.gitignore` (`lib/` is never
+/// committed), so the freshly cloned tree cannot satisfy the loader until it
+/// is built. The package's own `prepare` script is the npm-sanctioned hook
+/// for exactly this; running it via pnpm keeps toolchain resolution inside
+/// the plugin. Best-effort: when no `prepare` exists the plugin must ship
+/// prebuilt output, and `validate_plugin` still guards the final state, so
+/// this only reports failure when a declared prepare actually fails.
+fn build_git_plugin(
+    dest: &Path,
+    pnpm_exe: &Path,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<(), AppError> {
+    let root = match read_plugin_manifest(dest) {
+        Ok(root) => root,
+        Err(_) => return Ok(()), // validate_plugin reports the real problem
+    };
+    let has_prepare = root
+        .get("scripts")
+        .and_then(|s| s.get("prepare"))
+        .and_then(|p| p.as_str())
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    let main = root.get("main").and_then(|m| m.as_str()).unwrap_or("");
+    let entry_ready = !main.is_empty()
+        && (dest.join(main).is_file() || dest.join(format!("{main}.js")).is_file());
+    // Prebuilt repo: nothing to do. Declared-but-unbuilt is the common case.
+    if !has_prepare || entry_ready {
+        return Ok(());
+    }
+    // Dependencies are required for the build script to find its tools
+    // (tsdown etc.). install_store_deps runs later in link mode, but that is
+    // too late — the entry check happens first, and copy mode skips it.
+    on_progress("正在安装插件依赖并构建（pnpm，git 来源需要生成 lib/）");
+    let log_path = dest.join(".dsh-build.log");
+    let args = [
+        "install",
+        "--ignore-workspace",
+        "--config.node-linker=hoisted",
+        "--reporter=append-only",
+        "--config.enable-pre-post-scripts=true",
+    ];
+    // pnpm runs the package's `prepare` lifecycle script automatically after
+    // install when enable-pre-post-scripts is on.
+    let status =
+        kernel::run_pnpm(pnpm_exe, &args, dest, &log_path, &mut *on_progress).map_err(|e| {
+            AppError::Io(format!(
+                "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
+            ))
+        })?;
+    if !status.success() {
+        return Err(AppError::Plugin(format!(
+            "插件构建失败（退出码 {:?}）：`prepare` 未成功生成入口。详情见 {}",
+            status.code(),
+            log_path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn read_plugin_manifest(plugin_root: &Path) -> Result<serde_json::Value, serde_json::Error> {
@@ -799,9 +817,15 @@ fn manifest_is_bundle(plugin_root: &Path) -> bool {
 
 /// What the kernel needs to load an installed plugin: a parseable
 /// package.json with a name; when the package declares a bundle layer its
-/// patch file must exist, otherwise it needs a resolvable `main`/`exports`
-/// entry. Runs right after fetch so a non-conforming package fails the
-/// install loudly instead of breaking the next kernel boot.
+/// patch file must exist, and regardless of bundling it needs a resolvable
+/// `main`/`exports` entry. Runs right after fetch so a non-conforming
+/// package fails the install loudly instead of breaking the next kernel boot.
+///
+/// The entry check must run even when a bundle layer is present: plugins
+/// commonly declare both (the bundle patches the client UI while `main`
+/// loads the server half). Returning early on the bundle branch let git
+/// source installs through without their build output (`lib/` is
+/// gitignored), which then crashed the kernel at ESM resolution time.
 fn validate_plugin(dir: &Path) -> Result<(), AppError> {
     let root = read_plugin_manifest(dir)
         .map_err(|_| AppError::Plugin("不符合 dsh 插件规范：缺少可解析的 package.json".into()))?;
@@ -822,25 +846,26 @@ fn validate_plugin(dir: &Path) -> Result<(), AppError> {
                 "不符合 dsh 插件规范：声明了 bundle 层但包内找不到 patch 文件 {patch:?}，内核启动将无法加载该层"
             )));
         }
-        return Ok(());
+        // Fall through: the runtime entry below is still required.
     }
-    let main = root.get("main").and_then(|m| m.as_str()).unwrap_or("");
-    if !main.is_empty() {
+    let has_exports = root.get("exports").is_some();
+    if !has_exports {
+        let main = root.get("main").and_then(|m| m.as_str()).unwrap_or("");
+        if main.is_empty() {
+            return Err(AppError::Plugin(
+                "不符合 dsh 插件规范：既未声明 dsh.bundle.patch，也没有 main/exports 入口，内核无法加载"
+                    .into(),
+            ));
+        }
         // Node 解析 main 时允许省略 .js 后缀，两者都接受。
         if dir.join(main).is_file() || dir.join(format!("{main}.js")).is_file() {
             return Ok(());
         }
         return Err(AppError::Plugin(format!(
-            "不符合 dsh 插件规范：main 入口 {main:?} 在包内不存在，内核无法加载"
+            "不符合 dsh 插件规范：main 入口 {main:?} 在包内不存在，内核无法加载。git 来源的插件通常需要在包内执行一次构建（如 `pnpm run prepare`）生成 lib/"
         )));
     }
-    if root.get("exports").is_some() {
-        return Ok(());
-    }
-    Err(AppError::Plugin(
-        "不符合 dsh 插件规范：既未声明 dsh.bundle.patch，也没有 main/exports 入口，内核无法加载"
-            .into(),
-    ))
+    Ok(())
 }
 
 /// Install the plugin's own dependencies inside the store dir. Only link
@@ -1656,7 +1681,7 @@ pub fn install(
             spec.name
         )));
     }
-    let mut item = fetch_into_store(data_dir, &spec, on_progress)?;
+    let mut item = fetch_into_store(data_dir, pnpm_exe, &spec, on_progress)?;
     item.mode = if mode == "copy" { "copy" } else { "link" }.to_string();
     if item.mode == "link" {
         // Ensure the store-level .npmrc exists before installing deps, so the
@@ -1691,7 +1716,7 @@ pub fn update(
     }
     let spec = parse_spec(&item.source)?;
     on_progress(&format!("正在更新 {}", item.name));
-    let fetched = fetch_into_store(data_dir, &spec, on_progress)?;
+    let fetched = fetch_into_store(data_dir, pnpm_exe, &spec, on_progress)?;
     let mut updated = fetched;
     updated.mode = item.mode.clone();
     if updated.mode == "link" {
@@ -1964,9 +1989,9 @@ mod tests {
         .expect("manifest");
         assert!(validate_plugin(&dir).is_err());
 
-        // patch 文件补齐：放行
+        // patch 文件补齐但无运行时入口：仍拒绝，bundle 层不能替代 main/exports
         fs::write(dir.join("cordis.patch.yml"), "patches: []\n").expect("patch");
-        assert!(validate_plugin(&dir).is_ok());
+        assert!(validate_plugin(&dir).is_err());
 
         // 普通依赖型插件：main 指向真实文件才放行
         fs::write(
@@ -1977,6 +2002,14 @@ mod tests {
         assert!(validate_plugin(&dir).is_err());
         fs::create_dir_all(dir.join("lib")).expect("lib");
         fs::write(dir.join("lib/index.js"), "module.exports = {}\n").expect("entry");
+        assert!(validate_plugin(&dir).is_ok());
+
+        // bundle 层 + 有效运行时入口：放行
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"p","main":"lib/index.js","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        )
+        .expect("manifest");
         assert!(validate_plugin(&dir).is_ok());
 
         // exports 入口存在即放行（Node 自己解析其目标）
@@ -2045,29 +2078,6 @@ mod tests {
         assert!(id_for_name("..").is_err());
         assert!(id_for_name("").is_err());
         assert!(id_for_name("a//b").is_err());
-    }
-
-    #[test]
-    fn compares_versions() {
-        assert_eq!(cmp_versions("1.2.3", "1.2.3"), Ordering::Equal);
-        assert_eq!(cmp_versions("1.2.3", "1.2.4"), Ordering::Less);
-        assert_eq!(cmp_versions("v1.2.3", "1.2.3"), Ordering::Equal);
-        assert_eq!(cmp_versions("1.2.3-rc.1", "1.2.3"), Ordering::Less);
-        assert_eq!(cmp_versions("1.2.3-rc.2", "1.2.3-rc.1"), Ordering::Greater);
-        assert_eq!(cmp_versions("1.10.0", "1.9.9"), Ordering::Greater);
-        assert_eq!(cmp_versions("0.1.66", "0.1.70"), Ordering::Less);
-        assert_eq!(cmp_versions("0.1.1-rc.2", "0.1.1"), Ordering::Less);
-        assert_eq!(
-            cmp_versions("1.2.3-alpha.1", "1.2.3-alpha.2"),
-            Ordering::Less
-        );
-        // HEAD hash vs a semver tag: the semver parses as [n,n,n] and the
-        // hash parses as empty, so the hash sorts as Less — i.e. `latest =
-        // "0.16.0"` reports as newer than `installed = "head"`.  The fix in
-        // `update()` clears `latest_version` after install so this comparison
-        // never runs against a stale semver.
-        assert_eq!(cmp_versions("0.16.0", "head"), Ordering::Greater);
-        assert_eq!(cmp_versions("head", "head"), Ordering::Equal);
     }
 
     #[test]

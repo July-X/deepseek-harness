@@ -12,6 +12,7 @@ mod node;
 mod plugins;
 mod releases;
 mod settings;
+mod version;
 
 use std::sync::Mutex;
 
@@ -60,13 +61,26 @@ pub fn run() {
         .expect("failed to build the dsh-desktop app");
 
     // Reap the kernel when the shell exits so no dsh web process is left
-    // serving after the app quits.
+    // serving after the app quits. The in-memory child covers kernels this
+    // session spawned; the pid file covers orphans left by an earlier shell
+    // run (e.g. after a crash), guarded by `kill_pid`'s kernel check.
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
-                let mut guard = lock(&state.running);
-                if let Some(mut child) = guard.take() {
-                    let _ = kernel::stop(&mut child);
+                {
+                    let mut guard = lock(&state.running);
+                    if let Some(mut child) = guard.take() {
+                        let _ = kernel::stop(&mut child);
+                    }
+                }
+                let data_dir = state.data_dir.clone();
+                if !kernel::port_open(settings::load(&data_dir).port) {
+                    // Port free: either nothing runs or stop() above reaped
+                    // it — drop a stale pid record so the next start is clean.
+                    kernel::clear_pid(&data_dir);
+                } else if let Some(pid) = kernel::read_pid(&data_dir) {
+                    kernel::kill_pid(pid);
+                    kernel::clear_pid(&data_dir);
                 }
             }
         }

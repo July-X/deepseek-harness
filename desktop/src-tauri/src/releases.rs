@@ -13,12 +13,12 @@
 //! fallback warning flows back to the UI so users can tell which source
 //! they are looking at.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
+use crate::version::cmp_versions;
 
 /// Tag prefix on the official releases (e.g. `dsh-v0.1.1-rc.2`).
 pub const TAG_PREFIX: &str = "dsh-v";
@@ -90,6 +90,11 @@ struct NpmPackageDoc {
     /// The full set of published versions: `version -> metadata`.
     #[serde(default)]
     versions: BTreeMap<String, NpmVersion>,
+    /// Per-version publish timestamps (plus `created`/`modified` entries,
+    /// which are not versions). This is where npm actually carries the
+    /// publish date; `NpmVersion::date` is only a mirror fallback.
+    #[serde(default)]
+    time: BTreeMap<String, String>,
     /// `dist-tags`: `latest`, `next`, `beta`, etc. Versions tagged here are
     /// the only ones we treat as prereleases; everything else is stable.
     #[serde(rename = "dist-tags", default)]
@@ -125,6 +130,7 @@ fn fetch_npm() -> Result<Vec<ReleaseInfo>, String> {
         serde_json::from_str(&body).map_err(|e: serde_json::Error| e.to_string())?;
 
     let prereleases = pkg.prerelease_versions();
+    let times = pkg.time;
     let mut out: Vec<ReleaseInfo> = pkg
         .versions
         .into_iter()
@@ -144,7 +150,7 @@ fn fetch_npm() -> Result<Vec<ReleaseInfo>, String> {
                 version: version.clone(),
                 prerelease,
                 name: tag,
-                published_at: meta.date,
+                published_at: times.get(&version).cloned().or(meta.date),
                 html_url: format!("{NPM_PACKAGE_URL}/v/{version}"),
             }
         })
@@ -165,33 +171,6 @@ struct GhRelease {
     published_at: Option<String>,
     #[serde(default)]
     html_url: Option<String>,
-}
-
-/// Compare two dotted version strings with an optional `-prerelease` suffix.
-fn cmp_versions(a: &str, b: &str) -> Ordering {
-    let (a_main, a_pre) = a.split_once('-').unwrap_or((a, ""));
-    let (b_main, b_pre) = b.split_once('-').unwrap_or((b, ""));
-    let a_parts: Vec<u32> = a_main.split('.').filter_map(|p| p.parse().ok()).collect();
-    let b_parts: Vec<u32> = b_main.split('.').filter_map(|p| p.parse().ok()).collect();
-    for (x, y) in a_parts.iter().zip(b_parts.iter()) {
-        if x != y {
-            return x.cmp(y);
-        }
-    }
-    let a_main_len = a_main.split('.').count();
-    let b_main_len = b_main.split('.').count();
-    match a_main_len.cmp(&b_main_len) {
-        Ordering::Equal => {}
-        other => return other,
-    }
-    // A release without a prerelease beats one with it; short prerelease
-    // prefixes compare first (the npm convention).
-    match (a_pre.is_empty(), b_pre.is_empty()) {
-        (true, false) => return Ordering::Greater,
-        (false, true) => return Ordering::Less,
-        _ => {}
-    }
-    a_pre.cmp(b_pre)
 }
 
 /// Pull the `dsh-v*` release tags from the GitHub API (fallback).

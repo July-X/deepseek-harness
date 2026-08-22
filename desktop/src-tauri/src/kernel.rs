@@ -143,13 +143,27 @@ pub fn read_active(data_dir: &Path) -> Option<String> {
 
 /// Record the active version. Persisted as plain text so the CLI tooling and
 /// the app agree on a trivially inspectable format.
+///
+/// The write goes through a temp file + rename so a crash mid-write can
+/// never leave a truncated `active.txt` behind — the reader treats an empty
+/// file as "no active version", which would silently unpin the kernel.
 pub fn write_active(data_dir: &Path, version: Option<&str>) -> Result<(), AppError> {
     fs::create_dir_all(data_dir).map_err(|e| AppError::Io(e.to_string()))?;
+    let target = active_file(data_dir);
     match version {
-        Some(v) => fs::write(active_file(data_dir), format!("{v}\n")),
-        None => fs::remove_file(active_file(data_dir)),
+        Some(v) => {
+            let tmp = data_dir.join("active.txt.tmp");
+            fs::write(&tmp, format!("{v}\n")).map_err(|e| AppError::Io(e.to_string()))?;
+            fs::rename(&tmp, &target).map_err(|e| AppError::Io(e.to_string()))
+        }
+        None => match fs::remove_file(&target) {
+            Ok(()) => Ok(()),
+            // Removing a missing file is already the requested state; the
+            // uninstall path relies on this when cleaning up partially.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AppError::Io(e.to_string())),
+        },
     }
-    .map_err(|e| AppError::Io(e.to_string()))
 }
 
 /// Refresh the `active` flag on each installed version.
@@ -204,6 +218,40 @@ pub fn uninstall(data_dir: &Path, version: &str) -> Result<(), AppError> {
     fs::remove_dir_all(&dir).map_err(|e| AppError::Io(e.to_string()))
 }
 
+/// Keep only the newest `KEEP` install logs (by modified time) plus the one
+/// about to be written, so long-term use cannot balloon the logs directory.
+/// Only `install-*.log` files rotate — `kernel.log` is the running kernel's
+/// live log and must never be deleted out from under it.
+/// Best-effort: individual delete failures are ignored.
+fn rotate_install_logs(logs: &Path, keep: &Path) {
+    const KEEP: usize = 9;
+    let Ok(entries) = fs::read_dir(logs) else {
+        return;
+    };
+    let mut logs: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("install-"))
+        })
+        .filter(|p| p != keep)
+        .filter_map(|p| {
+            let modified = p.metadata().ok()?.modified().ok()?;
+            Some((modified, p))
+        })
+        .collect();
+    if logs.len() < KEEP {
+        return;
+    }
+    logs.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    for (_, path) in logs.iter().skip(KEEP - 1) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 /// Ask pnpm to install `@deepseek-ai/dsh@<version>` into its directory.
 ///
 /// `on_progress` receives human-readable stage messages plus every raw
@@ -227,6 +275,7 @@ pub fn install_version(
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::Io(e.to_string()))?;
     }
+    rotate_install_logs(&logs_dir(data_dir), &log_path);
 
     on_progress("正在通过 pnpm 安装内核（首次通常需要 1~3 分钟，下方为实时日志）");
     let spec = format!("@deepseek-ai/dsh@{version}");
@@ -347,9 +396,26 @@ pub(crate) fn run_pnpm(
         }
     });
 
-    for line in rx {
-        on_progress(line.trim_end());
-        let _ = writeln!(log, "{line}");
+    // pnpm can stay silent for tens of seconds while resolving the
+    // dependency graph; a heartbeat keeps the user informed that the
+    // install is still alive. `recv_timeout` wakes on every real line and
+    // emits the elapsed-time message only after HEARTBEAT_SECS of silence.
+    const HEARTBEAT_SECS: u64 = 10;
+    let started = std::time::Instant::now();
+    loop {
+        match rx.recv_timeout(Duration::from_secs(HEARTBEAT_SECS)) {
+            Ok(line) => {
+                on_progress(line.trim_end());
+                let _ = writeln!(log, "{line}");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let secs = started.elapsed().as_secs();
+                on_progress(&format!(
+                    "… 安装仍在进行（已进行 {secs} 秒，pnpm 正在解析依赖或下载）"
+                ));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
     }
 
     // The channel is closed by now, so both drains have finished their loops.
