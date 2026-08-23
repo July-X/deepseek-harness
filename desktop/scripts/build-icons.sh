@@ -49,31 +49,34 @@ done
 magick "$TMP/small-super.png" -filter LanczosSharp -resize 128x128 \
   -define png:color-type=6 "$TMP/small-128.png"
 
-# Stamp a rounded white background onto the desktop bundle variants.
+# Stamp a rounded white tile onto the desktop bundle variants.
 # Every frame that ends up in icon.ico / icon.icns / icon.png runs
-# through here so the icon sits on a clean rounded plate instead of
-# letting the Dock/taskbar chrome bleed through around the silhouette.
-# The plate is the full canvas; the whale itself is shrunk to ≈82% of
-# the side length and centered, leaving the iOS-style safe-area
-# padding (≈9% per side) that app icons expect on macOS Dock /
-# Windows taskbar. Corner radius follows the Big Sur app-icon look
-# (≈18% of the side length) — small enough that macOS's own dock
-# mask (squircle ≈ 22%) clips cleanly without leaving a white "ring"
-# in the corners, large enough that the Windows taskbar / start menu
-# icon reads as a modern rounded plate instead of a hard square. The
-# panel brand mark (`ui/whale-icon.png`) and the SVG favicons stay
-# transparent so they keep layering cleanly onto the dark management
-# surface and the web background — the rounded white plate is a
-# desktop-bundle concern, not a brand-wide one.
+# through here so the icon reads as an OS-style rounded tile: macOS
+# Dock applies NO mask or background of its own — a fully transparent
+# icon floats as a bare silhouette, and corners flattened to white
+# read as a hard square. The tile follows Apple's macOS icon grid:
+# the visible rounded rect occupies 824/1024 (≈80%) of the canvas,
+# centered, with the surrounding margin left TRANSPARENT — a tile
+# that fills the whole canvas reads noticeably larger than every
+# other Dock icon. Corner radius is 18% of the canvas (≈22.4% of the
+# tile, the Big Sur squircle proportion); the whale is 75% of the
+# tile (≈60% of the canvas), matching the glyph weight of neighboring
+# app icons. The panel brand mark (`ui/whale-icon.png`) and the SVG
+# favicons stay fully transparent — they layer onto the dark
+# management surface and web backgrounds. Output stays RGBA
+# (png:color-type=6): tauri::generate_context! refuses RGB PNGs at
+# compile time.
 plate_white_rounded() {
   local src="$1" size="$2" dst="$3"
+  local tile=$(( size * 824 / 1024 ))
   local radius=$(( size * 18 / 100 ))
-  local inset=$(( size * 82 / 100 ))
-  magick -size "${size}x${size}" xc:none \
-    -fill white -draw "roundrectangle 0,0 $((size - 1)),$((size - 1)) ${radius},${radius}" \
+  local inset=$(( tile * 75 / 100 ))
+  magick -size "${tile}x${tile}" xc:none \
+    -fill white -draw "roundrectangle 0,0 $((tile - 1)),$((tile - 1)) ${radius},${radius}" \
     \( "$src" -resize "${inset}x${inset}" \) \
     -gravity center -compose Over -composite \
-    -background white -alpha remove -alpha off \
+    -background none -gravity center -extent "${size}x${size}" \
+    -depth 8 -define png:color-type=6 \
     "$dst"
 }
 for s in 16 24 32 48 64; do
@@ -89,10 +92,6 @@ cp "$TMP/master-128-plate.png" "$ICONS/128x128.png"
 cp "$TMP/master-256-plate.png" "$ICONS/128x128@2x.png"
 cp "$TMP/master-512-plate.png" "$ICONS/icon.png"
 cp "$TMP/master-512-plate.png" assets/whale-icon-512.png
-
-# Panel brand mark keeps its transparent background; it sits on the
-# dark chrome row above the navigation and would read as a stray
-# white square otherwise.
 cp "$TMP/small-128.png" ui/whale-icon.png
 
 # Windows .ico: per-size frames, small variant below 128.
