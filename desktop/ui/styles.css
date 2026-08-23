@@ -648,15 +648,22 @@ button.danger.armed {
   );
   filter: blur(0.4px);
   border-radius: 999px;
-  animation: pulse-sweep 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  animation: titlebar-pulse-sweep 7.68s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   box-shadow: 0 0 8px rgba(255, 45, 48, 0.45);
 }
 
 .progress-pulse::after {
-  animation-delay: 1.6s;
+  animation-delay: 3.84s;
 }
 
-@keyframes pulse-sweep {
+/* Shared keyframes for every whale-eye pulse on the shell: the workbench
+   titlebar (`body::after` / `body > [data-titlebar-pulse='2']`) and the
+   card install bar (`.progress-pulse::before/after`) all sweep with the
+   same translate / opacity envelope so the chrome and the install
+   overlay carry one beat. The keyframe name matches
+   `packages/client/web/src/base.css` so the desktop shell panel and the
+   dsh web workbench share one rhythm across surfaces. */
+@keyframes titlebar-pulse-sweep {
   0% {
     transform: translateX(-120%);
     opacity: 0;
@@ -928,40 +935,73 @@ button.danger.armed {
   margin-top: 12px;
 }
 
-/* Top of the workbench: a single hairline highlight strip that runs
-   across the whole window above the sidebar / panel split. Tinted from
-   `assets/whale-icon.svg`'s eye palette (--whale-eye-bright core,
-   --whale-eye-soft halo, --whale-eye outer glow) so it carries the same
-   brand beat as the whale icon at the top of the sidebar and the
-   `.progress-pulse` install bar. The gradient is intentionally weak:
-   the user said "淡淡的", so peak opacity sits around 0.22 and edges
-   fade to fully transparent. The strip is 6px tall (doubled from the
-   earlier 3px so the highlight reads at a glance rather than as a
-   hairline), with a faint inset box-shadow that bleeds the same colors
-   a couple of pixels downward so it reads as a soft edge-light rather
-   than a hard painted line. `position: fixed` keeps it pinned to the
-   window top regardless of scroll, and `pointer-events: none` lets
-   clicks fall through to the panel below. */
-body::before {
+/* Titlebar pulse — sweeps left-to-right across the top of the workbench,
+   right under the OS native titlebar. The earlier 28px static brand band
+   (`body::before`) was removed so only the moving highlight remains; the
+   pulse is the entire brand presence at the chrome row. Tinted from the
+   whale-eye mid / bright tokens (`rgba(255, 90, 94)` halo,
+   `--whale-eye-bright` core) so the moving highlight reads in the brand
+   palette. Two stacked sweeps with a half-cycle offset keep the pulse
+   continuous rather than a single dash crossing then dead space — same
+   trick the card install bar (`.progress-pulse::before/after`) and the
+   dsh web workbench (`packages/client/web/src/base.css` `body::after` /
+   `body > [data-titlebar-pulse='2']`) use. `position: fixed` pins the
+   sweep to the webview top regardless of scroll, and `pointer-events:
+   none` keeps the OS native chrome above reachable for drag / resize /
+   double-click-zoom without interference. The sweep rides a 4px track
+   and a 6.4s period (half the previous 3.2s so the eye lands on the
+   pulse rather than chasing it). */
+body::after {
   content: '';
   position: fixed;
   top: 0;
   left: 0;
-  right: 0;
-  height: 6px;
+  height: 3px;
+  width: 38%;
   z-index: 1000;
   pointer-events: none;
   background: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(255, 217, 217, 0.10) 18%,
-    rgba(255, 90, 94, 0.20) 38%,
-    rgba(255, 45, 48, 0.22) 50%,
-    rgba(255, 90, 94, 0.20) 62%,
-    rgba(255, 217, 217, 0.10) 82%,
+    rgba(255, 90, 94, 0.55) 30%,
+    var(--whale-eye-bright) 50%,
+    rgba(255, 90, 94, 0.55) 70%,
     transparent 100%
   );
-  box-shadow:
-    inset 0 -1px 0 rgba(255, 45, 48, 0.14),
-    0 2px 10px rgba(255, 45, 48, 0.12);
+  filter: blur(0.4px);
+  border-radius: 999px;
+  animation: titlebar-pulse-sweep 7.68s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  box-shadow: 0 0 8px rgba(255, 45, 48, 0.45);
+}
+
+/* Second sweep: same width and gradient as `body::after`, offset by half
+   a cycle (3.2s) so the eye sees a continuous scan rather than a single
+   dash crossing then dead space. Mounted as a direct child of `<body>`
+   in `desktop/ui/index.html` (a `<div data-titlebar-pulse="2"
+   aria-hidden="true">`); the web workbench injects the same node at
+   boot through `BootPage.installTitlebarPulse()` so the two surfaces
+   use one rhythm. `position: fixed` and the rest of the layout match
+   `body::after` so the two sweeps overlap perfectly when they cross
+   the centre. */
+body > [data-titlebar-pulse='2'] {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  width: 38%;
+  z-index: 1000;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 90, 94, 0.55) 30%,
+    var(--whale-eye-bright) 50%,
+    rgba(255, 90, 94, 0.55) 70%,
+    transparent 100%
+  );
+  filter: blur(0.4px);
+  border-radius: 999px;
+  animation: titlebar-pulse-sweep 7.68s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  animation-delay: 3.84s;
+  box-shadow: 0 0 8px rgba(255, 45, 48, 0.45);
 }
