@@ -382,9 +382,18 @@ pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
             // is left alone.
             if !killed {
                 if let Some(pid) = kernel::port_listen_pid(port) {
-                    if kernel::pid_is_kernel(pid) {
-                        kernel::kill_pid(pid);
+                    #[cfg(unix)]
+                    {
+                        if kernel::pid_is_kernel(pid) {
+                            kernel::kill_pid(pid);
+                        }
                     }
+                    // Windows has no cheap pid-is-kernel probe (a
+                    // Get-CimInstance query is too slow for the stop
+                    // path); kill_pid's taskkill matches the existing
+                    // unguarded Windows stop behavior.
+                    #[cfg(windows)]
+                    kernel::kill_pid(pid);
                 }
             }
         }
