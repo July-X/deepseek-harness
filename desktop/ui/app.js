@@ -587,13 +587,110 @@ function openHarnessWindow() {
   invoke('open_harness').catch((e) => toast('无法打开工作台窗口：' + e, 5000));
 }
 
-function showLogs() {
-  invoke('get_kernel_log')
+// --- logs modal -----------------------------------------------------------
+//
+// The modal lists every *.log file under <data_dir>/logs/ as a tab. The
+// first tab (newest file by name — `kernel.log` for live output) is read
+// when the modal opens; switching tabs is on-demand and a refresh button
+// re-reads the active tab. Tabs scroll horizontally when they don't fit
+// on the 480px window so the panel stays single-row.
+
+let activeLogName = null;
+
+function formatLogSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function renderLogTabs(files, selectedName) {
+  const strip = $('logTabs');
+  strip.innerHTML = '';
+  if (!files || !files.length) {
+    const empty = document.createElement('span');
+    empty.className = 'log-tab-size';
+    empty.textContent = '（暂无日志文件）';
+    strip.appendChild(empty);
+    return;
+  }
+  files.forEach((f) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'log-tab';
+    btn.role = 'tab';
+    btn.dataset.name = f.name;
+    btn.setAttribute('aria-selected', f.name === selectedName ? 'true' : 'false');
+    btn.title = f.name;
+    const label = document.createElement('span');
+    label.textContent = f.name;
+    btn.appendChild(label);
+    if (typeof f.size === 'number') {
+      const sz = document.createElement('span');
+      sz.className = 'log-tab-size';
+      sz.textContent = formatLogSize(f.size);
+      btn.appendChild(sz);
+    }
+    btn.addEventListener('click', () => switchLogTab(f.name));
+    strip.appendChild(btn);
+  });
+}
+
+function selectLogTab(name) {
+  document.querySelectorAll('#logTabs .log-tab').forEach((el) => {
+    el.setAttribute('aria-selected', el.dataset.name === name ? 'true' : 'false');
+  });
+}
+
+function loadActiveLog() {
+  if (!activeLogName) {
+    $('logContent').textContent = '（暂无日志）';
+    return;
+  }
+  const target = activeLogName;
+  $('logContent').textContent = '读取中…';
+  invoke('read_log_file', { name: target })
     .then((text) => {
-      $('logContent').textContent = text || '（暂无日志）';
-      $('logModal').classList.remove('hidden');
+      // Guard against a tab switch happening mid-fetch: only paint the
+      // content if the user hasn't navigated away.
+      if (activeLogName !== target) return;
+      $('logContent').textContent = text || '（暂无内容）';
     })
-    .catch((e) => toast('读取日志失败：' + e, 4000));
+    .catch((e) => {
+      $('logContent').textContent = '读取失败：' + e;
+    });
+}
+
+function switchLogTab(name) {
+  if (name === activeLogName) {
+    loadActiveLog();
+    return;
+  }
+  activeLogName = name;
+  selectLogTab(name);
+  loadActiveLog();
+}
+
+function refreshLogTabs() {
+  // Re-list files so new install logs and rotated kernel logs appear, then
+  // keep the user on the same tab if it still exists; otherwise fall back
+  // to the first tab (or the empty state).
+  invoke('list_log_files')
+    .then((files) => {
+      const names = (files || []).map((f) => f.name);
+      const keep = activeLogName && names.includes(activeLogName) ? activeLogName : null;
+      const next = keep || (names[0] || null);
+      renderLogTabs(files || [], next);
+      activeLogName = next;
+      if (next) loadActiveLog();
+      else $('logContent').textContent = '（暂无日志文件）';
+    })
+    .catch((e) => toast('读取日志列表失败：' + e, 4000));
+}
+
+function showLogs() {
+  $('logModal').classList.remove('hidden');
+  activeLogName = null;
+  refreshLogTabs();
 }
 
 function hideLogs() {
@@ -649,6 +746,7 @@ $('btnToggle').addEventListener('click', () => {
 $('btnOpenWindow').addEventListener('click', openHarnessWindow);
 $('btnLogs').addEventListener('click', showLogs);
 $('btnLogClose').addEventListener('click', hideLogs);
+$('btnLogRefresh').addEventListener('click', () => loadActiveLog());
 $('btnConfirmOk').addEventListener('click', () => settleConfirm(true));
 $('btnConfirmCancel').addEventListener('click', () => settleConfirm(false));
 $('btnDetectNode').addEventListener('click', detectNode);

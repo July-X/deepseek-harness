@@ -69,8 +69,8 @@ body {
 }
 
 .brand img {
-  width: 60px;
-  height: 60px;
+  width: 64px;
+  height: 64px;
   display: block;
 }
 
@@ -269,9 +269,9 @@ main {
   flex: 0 0 auto;
   /* Square logos ~ 1em tall — sized to match the surrounding heading
      text so the logo and the words sit on the same visual line. */
-  height: 1.2em;
-  width: 1.2em;
-  border-radius: 4px;
+  height: 1.4em;
+  width: 1.4em;
+  border-radius: 3px;
   object-fit: cover;
 }
 
@@ -900,6 +900,21 @@ button.danger.armed {
   z-index: 45;
 }
 
+/* Logs panel sits at the top of the window instead of the vertical center,
+   so the user sees the live output close to where they're reading the
+   overview. The body remains anchored to the top edge with a fixed height;
+   the centered modal default still applies to dialogs (confirm, install). */
+.modal-top {
+  display: block;
+  background: transparent;
+  pointer-events: none;
+}
+.modal-top .modal-body {
+  pointer-events: auto;
+  margin: 12px auto 0;
+  max-height: 60vh;
+}
+
 .modal-body {
   width: min(860px, 92vw);
   max-height: 84vh;
@@ -914,13 +929,19 @@ button.danger.armed {
 .modal-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 12px 18px;
   border-bottom: 1px solid var(--border);
 }
 
 .modal-head h2 {
   margin: 0;
+}
+
+/* flex spacer pushes the action buttons to the right inside the log
+   modal's head row without rewriting the shared .modal-head rule. */
+.modal-head-spacer {
+  flex: 1;
 }
 
 /* flex:1 + min-height:0 lets the log actually scroll inside the 84vh modal;
@@ -936,6 +957,50 @@ button.danger.armed {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* Per-file tab strip for the logs modal. Horizontally scrollable when the
+   logs directory has more tabs than fit on the 480px window; vertical
+   overflow is hidden so tabs never wrap into a second row. */
+.log-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.log-tab {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.log-tab:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.04);
+}
+.log-tab[aria-selected="true"] {
+  color: var(--fg);
+  background: #0d1428;
+  border-color: var(--border);
+  position: relative;
+  top: 1px;
+}
+.log-tab-size {
+  font-size: 11px;
+  opacity: 0.6;
 }
 
 .confirm-body {

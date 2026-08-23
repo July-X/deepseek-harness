@@ -133,6 +133,65 @@ pub fn get_kernel_log(state: State<'_, AppState>) -> String {
     )
 }
 
+/// One entry for the log-files modal tab list.
+#[derive(Serialize)]
+pub struct LogFileEntry {
+    /// Just the basename (e.g. `kernel.log`, `install-0.1.0-rc.6.log`); the
+    /// UI passes it back to `read_log_file`. Never expose absolute paths —
+    /// the UI runs in a sandboxed webview and should not need them.
+    pub name: String,
+    /// File size in bytes; the modal shows it next to the tab name.
+    pub size: u64,
+}
+
+/// List `*.log` files under the shell's log directory, newest first.
+///
+/// Files that disappear between `read_dir` and `metadata` are silently
+/// skipped — install logs are rotated in place and may race with this scan.
+#[tauri::command]
+pub fn list_log_files(state: State<'_, AppState>) -> Vec<LogFileEntry> {
+    let dir = kernel::logs_dir(&state.data_dir);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<LogFileEntry> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("log") {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            Some(LogFileEntry { name, size })
+        })
+        .collect();
+
+    // Newest first so the live `kernel.log` (touched on every status tick)
+    // lands at index 0 — the modal's default tab.
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    out
+}
+
+/// Read the tail of a named log file under the logs directory.
+///
+/// `name` must be a bare filename with no path separators; the function
+/// refuses anything else to keep the UI's tab list from escaping the
+/// logs directory. The same 16 KiB tail bound used by `get_kernel_log`
+/// keeps the modal responsive on large install logs.
+#[tauri::command]
+pub fn read_log_file(state: State<'_, AppState>, name: String) -> Result<String, String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("非法的日志文件名：{name}"));
+    }
+    let path = kernel::logs_dir(&state.data_dir).join(&name);
+    if !path.starts_with(kernel::logs_dir(&state.data_dir)) {
+        return Err(format!("日志路径越界：{name}"));
+    }
+    Ok(read_tail(&path, 16 * 1024))
+}
+
 /// Reveal the shell's data directory in the OS file manager.
 ///
 /// The path comes from `AppState.data_dir`, which `lib::setup` resolves

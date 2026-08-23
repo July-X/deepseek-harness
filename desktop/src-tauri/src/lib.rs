@@ -88,6 +88,8 @@ pub fn run() {
             commands::detect_node,
             commands::save_settings,
             commands::get_kernel_log,
+            commands::list_log_files,
+            commands::read_log_file,
             commands::open_data_dir,
             commands::check_shell_update,
             commands::install_shell_update,

@@ -323,14 +323,19 @@
     </div>
   </div>
 
-  <div id="logModal" class="modal hidden">
+  <div id="logModal" class="modal modal-top hidden">
     <div class="modal-body">
       <div class="modal-head">
-        <h2>内核日志</h2>
+        <h2>日志</h2>
+        <div class="modal-head-spacer"></div>
+        <button id="btnLogRefresh" type="button" class="ghost" title="重新读取当前日志">
+          <svg class="icon"><use href="#i-refresh" /></svg><span>刷新</span>
+        </button>
         <button id="btnLogClose" type="button" class="ghost">
           <svg class="icon"><use href="#i-x" /></svg><span>关闭</span>
         </button>
       </div>
+      <div id="logTabs" class="log-tabs" role="tablist"></div>
       <pre id="logContent"></pre>
     </div>
   </div>
