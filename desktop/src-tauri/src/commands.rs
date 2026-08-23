@@ -520,6 +520,10 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
             if let Err(e) = result {
                 eprintln!("dsh-desktop: failed to open harness window: {e}");
             }
+            #[cfg(debug_assertions)]
+            if let Ok(window) = app.get_webview_window("harness").ok_or("no harness window") {
+                window.open_devtools();
+            }
         })
         .map_err(|e| e.to_string())?;
     Ok(())
