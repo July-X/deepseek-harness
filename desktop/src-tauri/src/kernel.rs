@@ -565,6 +565,100 @@ pub fn stop(child: &mut Child) -> Result<(), AppError> {
 // The shell's in-memory `running` child is lost when the shell itself
 // restarts. The pid file lets a later「停止内核」still reap the kernel.
 
+// --- port-based pid lookup --------------------------------------------------
+//
+// When the dev and release shells run side-by-side (see the data-dir
+// isolation in `data_dir` + `DEFAULT_PORT`), the release shell's
+// `kernel.pid` is irrelevant to the dev shell and vice versa. The dev
+// shell can also be restarted while the kernel it started is still
+// running — the in-memory `state.running` handle is gone, and the
+// `start_maybe` call skipped the kernel start because the port was
+// already open, so the dev shell never wrote its own pid file. Stop
+// then has no pid to kill; the kernel stays up and the UI keeps
+// reading the port as "running". Lookup by listening port recovers
+// the pid in this scenario — the dev shell, the release shell, and
+// any future shell that wants to take over a kernel it did not start
+// can all reap the running process.
+
+/// Return the pid of whatever process is currently listening on
+/// `127.0.0.1:port`, or `None` if the port is free or the platform-
+/// specific lookup fails. Used as a fallback when the kernel pid
+/// file is missing or points at a stale process.
+#[cfg(unix)]
+pub(crate) fn port_listen_pid(port: u16) -> Option<u32> {
+    // lsof is the most portable: it ships with macOS by default and
+    // is in the base package of most Linux distributions.
+    // `-nP` skips DNS and service-name resolution (faster, deterministic
+    // output); `-iTCP:PORT -sTCP:LISTEN -t` filters to the one pid we
+    // want — the first line is the pid of the listener.
+    if let Some(pid) = port_listen_pid_lsof(port) {
+        return Some(pid);
+    }
+    // Fallback to `ss` for Linux systems that don't have lsof.
+    port_listen_pid_ss(port)
+}
+
+#[cfg(unix)]
+pub(crate) fn port_listen_pid_lsof(port: u16) -> Option<u32> {
+    use std::process::Command;
+    let out = Command::new("lsof")
+        .args(["-nP", "-iTCP", &port.to_string(), "-sTCP:LISTEN", "-t"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+#[cfg(unix)]
+pub(crate) fn port_listen_pid_ss(port: u16) -> Option<u32> {
+    use std::process::Command;
+    let out = Command::new("ss")
+        .args(["-lntp", &format!("sport = :{}", port)])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    // ss line format:
+    //   LISTEN 0 128  127.0.0.1:3091  127.0.0.1:*  users:(("node",pid=1762,fd=22))
+    // The pid lives inside the users:((\"...\",pid=NUMBER,fd=NUMBER)) tuple;
+    // we don't need to parse the surrounding text — just pick the first
+    // "pid=NUMBER" segment.
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let idx = line.find("pid=")?;
+            let after = &line[idx + 4..];
+            let end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
+            after[..end].parse().ok()
+        })
+        .next()
+}
+
+#[cfg(windows)]
+pub(crate) fn port_listen_pid(port: u16) -> Option<u32> {
+    use std::process::Command;
+    // netstat -ano emits one line per TCP/UDP endpoint; filter by
+    // `:PORT` and `LISTENING` to find the pid of whatever is bound
+    // to the dev/release port.
+    let out = Command::new("netstat").args(["-ano"]).output().ok()?;
+    let port_str = port.to_string();
+    let needle = format!(":{}", port_str);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if line.contains(&needle) && line.contains("LISTENING") {
+            if let Some(pid) = line.split_whitespace().last() {
+                if let Ok(pid) = pid.parse() {
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// PID file of the last kernel the shell spawned: `<data_dir>/kernel.pid`.
 fn pid_path(data_dir: &Path) -> PathBuf {
     data_dir.join("kernel.pid")
@@ -592,7 +686,7 @@ pub fn clear_pid(data_dir: &Path) {
 /// Whether the process behind `pid` looks like a kernel the shell spawned,
 /// guarding against killing an unrelated process after pid reuse.
 #[cfg(unix)]
-fn pid_is_kernel(pid: u32) -> bool {
+pub(crate) fn pid_is_kernel(pid: u32) -> bool {
     Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output()

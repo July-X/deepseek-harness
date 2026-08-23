@@ -359,8 +359,33 @@ pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
         }
         let port = settings::load(&data_dir).port;
         if kernel::port_open(port) {
+            // First try the pid file — the in-memory handle is gone
+            // across a shell restart, but a previous shell wrote a
+            // pid to <data_dir>/kernel.pid and the kernel it spawned
+            // is still bound to this port. kill_pid already validates
+            // that the pid still points at a dsh kernel before sending
+            // signals, so a pid recycled to an unrelated process is
+            // a no-op.
+            let mut killed = false;
             if let Some(pid) = kernel::read_pid(&data_dir) {
                 kernel::kill_pid(pid);
+                killed = true;
+            }
+            // Fallback: when the dev/release shells run side-by-side
+            // and the in-memory child + pid file are both missing
+            // (e.g. start_maybe skipped the launch because the port
+            // was already bound by the other shell's kernel), the
+            // shell has no in-record way to find the listener. Walk
+            // the listening port to recover its pid, then run it
+            // through the same pid_is_kernel guard so a recycled
+            // pid that happens to point at an unrelated process still
+            // is left alone.
+            if !killed {
+                if let Some(pid) = kernel::port_listen_pid(port) {
+                    if kernel::pid_is_kernel(pid) {
+                        kernel::kill_pid(pid);
+                    }
+                }
             }
         }
         kernel::clear_pid(&data_dir);
