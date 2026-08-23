@@ -281,17 +281,19 @@ main::-webkit-scrollbar-thumb,
   border-radius: 2px;
 }
 
-/* 窄窗口：侧栏折叠为顶部横向菜单，内容随页面滚动。 */
+/* 窄窗口：侧栏折叠为顶部横向菜单，**顶部固定不动**，滚动条只控制主面板
+   下方内容区。layout 仍是 flex column，但 sidebar 设为 flex:0 不参与 flex
+   增长，main 仍带 overflow-y: auto 让内容独立滚动。 */
 @media (max-width: 760px) {
   body {
-    overflow: auto;
+    overflow: hidden;
   }
   .layout {
     flex-direction: column;
-    height: auto;
-    min-height: 100%;
+    height: 100%;
   }
   .sidebar {
+    flex: 0 0 auto;
     width: auto;
     flex-direction: row;
     flex-wrap: wrap;
@@ -337,7 +339,7 @@ main::-webkit-scrollbar-thumb,
     padding: 5px 10px;
   }
   main {
-    overflow: visible;
+    overflow-y: auto;
     padding: 16px;
   }
   .card {
