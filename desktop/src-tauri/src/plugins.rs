@@ -600,9 +600,53 @@ fn write_source_marker(spec: &PluginSpec, version: &str, dest: &Path) -> Result<
     fs::write(dest.join(SOURCE_MARKER), text + "\n").map_err(|e| AppError::Io(e.to_string()))
 }
 
-/// Fetch a plugin into the store under a fresh tmp dir, then atomically swap
-/// it into place. Returns the new store item, inheriting mode and latest.
-/// `pnpm_exe` builds git-sourced plugins whose committed tree lacks `lib/`.
+/// Prefix for an in-progress fetch dir (`.tmp-<pid>-<ts>`). Stamped with a
+/// `.dsh-id` marker so `reconcile_store` can group staging dirs by plugin
+/// without parsing the id out of the dir name (which can contain `-`).
+const TMP_PREFIX: &str = "tmp-";
+/// Prefix for a fetch that completed `validate_plugin` and is waiting to
+/// be published. `.new-<pid>-<ts>` only exists between validation and the
+/// final rename onto `final_dir`.
+const NEW_PREFIX: &str = "new-";
+/// Prefix for the previous live plugin dir, moved aside during the
+/// `final_dir` → `new_dir` swap. `.backup-<pid>-<ts>` stays until the
+/// publish succeeds and the next cleanup pass removes it; on a crash
+/// mid-swap it is the safety net that lets `reconcile_store` revert to
+/// the known-good previous version.
+const BACKUP_PREFIX: &str = "backup-";
+/// File inside each staging dir carrying the plugin id so recovery can
+/// identify which plugin the dir belongs to without parsing the path.
+const ID_MARKER: &str = ".dsh-id";
+
+/// Build a uniquely-named staging dir under `store` and stamp its id
+/// marker. `kind` is `TMP_PREFIX` / `NEW_PREFIX` / `BACKUP_PREFIX`; `pid`
+/// and `ts` are folded into the name so two concurrent fetches (or two
+/// updates interleaved with a crash) cannot collide.
+fn new_staging_dir(store: &Path, kind: &str, id: &str) -> io::Result<PathBuf> {
+    let ts = now_epoch_secs();
+    let pid = std::process::id();
+    let dir = store.join(format!("{kind}{pid}-{ts}"));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(ID_MARKER), format!("{id}\n"))?;
+    Ok(dir)
+}
+
+/// Fetch a plugin into the store under a staged tmp dir, validate it, then
+/// publish it over `final_dir` with crash-safe bookkeeping. Returns the
+/// new store item, inheriting mode and latest. `pnpm_exe` builds
+/// git-sourced plugins whose committed tree lacks `lib/`.
+///
+/// The fetch → validate → publish sequence uses three staging names so a
+/// crash at any step leaves the live plugin (`final_dir`) in one of two
+/// recoverable states: pointing at the previous version (preserved
+/// unchanged until the swap starts) or pointing at the new version
+/// (validation already passed before the publish rename). The transient
+/// gap when `final_dir` is briefly missing is reconciled on next launch by
+/// `reconcile_store`, which prefers to revert to the previous version
+/// when both `.new-*` and `.backup-*` survive a crash — the new content
+/// is already on disk and validated, so a user retry just needs to
+/// re-trigger the publish step.
 fn fetch_into_store(
     data_dir: &Path,
     pnpm_exe: &Path,
@@ -611,9 +655,8 @@ fn fetch_into_store(
 ) -> Result<StoreItem, AppError> {
     let store = store_dir(data_dir);
     fs::create_dir_all(&store).map_err(|e| AppError::Io(e.to_string()))?;
-    let tmp = store.join(format!(".tmp-{}-{}", spec.id, now_epoch_secs()));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| AppError::Io(e.to_string()))?;
+    let tmp = new_staging_dir(&store, TMP_PREFIX, &spec.id)
+        .map_err(|e| AppError::Io(e.to_string()))?;
 
     let version = match spec.origin.as_str() {
         "npm" => fetch_npm(spec, &tmp, on_progress),
@@ -634,15 +677,29 @@ fn fetch_into_store(
         return Err(e);
     }
 
+    // Promote `tmp` to `.new-*` once validation has passed. After this
+    // point the staging content is known-good; a subsequent crash should
+    // either keep it (recovery promotes `.new-*` to `final_dir`) or
+    // ignore it (recovery falls back to `.backup-*`). Crash semantics
+    // from here on are documented at the function header.
+    let new = new_staging_dir(&store, NEW_PREFIX, &spec.id)
+        .map_err(|e| AppError::Io(e.to_string()))?;
+    fs::rename(&tmp, &new).map_err(|e| AppError::Io(e.to_string()))?;
+
     let final_dir = store_plugin_dir(data_dir, &spec.id);
+    let backup = new_staging_dir(&store, BACKUP_PREFIX, &spec.id)
+        .map_err(|e| AppError::Io(e.to_string()))?;
+    let _ = fs::remove_dir_all(&backup);
     if final_dir.exists() {
-        // 更新路径：旧目录先移走再删除，rename 失败也不破坏新内容
-        let old = store.join(format!(".old-{}-{}", spec.id, now_epoch_secs()));
-        let _ = fs::remove_dir_all(&old);
-        fs::rename(&final_dir, &old).map_err(|e| AppError::Io(e.to_string()))?;
-        let _ = fs::remove_dir_all(&old);
+        fs::rename(&final_dir, &backup).map_err(|e| AppError::Io(e.to_string()))?;
     }
-    fs::rename(&tmp, &final_dir).map_err(|e| AppError::Io(e.to_string()))?;
+
+    fs::rename(&new, &final_dir).map_err(|e| AppError::Io(e.to_string()))?;
+
+    // Best-effort: if the shell exits between the publish rename and
+    // this cleanup, `reconcile_store` removes the backup on next start.
+    let _ = fs::remove_dir_all(&backup);
+
     write_source_marker(spec, &version, &final_dir)?;
 
     let now = now_epoch_secs();
@@ -667,6 +724,118 @@ fn fetch_into_store(
         repo_url: spec.repo_url.clone(),
         description: None,
     })
+}
+
+/// Reconcile staging dirs left over by an interrupted update. Safe to run
+/// on every startup; the happy path (no leftover staging) is a single
+/// `read_dir` scan with no renames or deletes.
+///
+/// Per plugin id, the recovery rules are:
+///
+/// | `final_dir` | `.new-*` | `.backup-*` | `.tmp-*` | action |
+/// | --- | --- | --- | --- | --- |
+/// | exists | any | any | any | remove all staging (post-publish cleanup or stale attempt) |
+/// | missing | no | yes | no | revert: rename `.backup-*` to `final_dir` |
+/// | missing | yes | no | no | publish: rename `.new-*` to `final_dir` |
+/// | missing | yes | yes | any | revert (safer; user keeps the known-good previous version) |
+/// | missing | no | no | yes | incomplete fetch; remove `.tmp-*` |
+/// | missing | yes | yes | yes | revert + remove tmp |
+///
+/// When multiple staging dirs share the same id (unlikely but possible if
+/// a previous crash happened while a recovery itself was being attempted),
+/// the freshest one wins: `.tmp-*` are always discarded (never validated);
+/// among `.new-*` / `.backup-*` the lexicographically largest suffix wins
+/// (timestamps + pids sort newest-last), and any older peer is removed.
+pub fn reconcile_store(data_dir: &Path) {
+    let store = store_dir(data_dir);
+    let Ok(entries) = fs::read_dir(&store) else {
+        return;
+    };
+
+    enum Kind {
+        Tmp,
+        New,
+        Backup,
+    }
+
+    let mut by_id: std::collections::HashMap<String, Vec<(Kind, PathBuf)>> =
+        std::collections::HashMap::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let kind = if name.starts_with(TMP_PREFIX) {
+            Kind::Tmp
+        } else if name.starts_with(NEW_PREFIX) {
+            Kind::New
+        } else if name.starts_with(BACKUP_PREFIX) {
+            Kind::Backup
+        } else {
+            continue;
+        };
+        let Some(id) = fs::read_to_string(entry.path().join(ID_MARKER))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        else {
+            // Orphaned staging dir without an id marker (e.g. from an
+            // older shell that wrote the staging name differently).
+            // Best-effort: leave it alone so the user can inspect.
+            continue;
+        };
+        by_id.entry(id).or_default().push((kind, entry.path()));
+    }
+
+    for (id, mut items) in by_id {
+        let final_dir = store.join(&id);
+        // Sort by dir name (which encodes pid + ts); newest last.
+        items.sort_by(|a, b| a.1.file_name().cmp(&b.1.file_name()));
+
+        if final_dir.exists() {
+            for (_, path) in items {
+                let _ = fs::remove_dir_all(&path);
+            }
+            continue;
+        }
+
+        // Pick the newest `.new-*` and `.backup-*` (independently), and
+        // drop every older peer. `.tmp-*` is always dropped.
+        let newest_new = items
+            .iter()
+            .rev()
+            .find(|(k, _)| matches!(k, Kind::New))
+            .map(|(_, p)| p.clone());
+        let newest_backup = items
+            .iter()
+            .rev()
+            .find(|(k, _)| matches!(k, Kind::Backup))
+            .map(|(_, p)| p.clone());
+        for (kind, path) in &items {
+            let drop = match kind {
+                Kind::Tmp => true,
+                Kind::New => Some(path) != newest_new.as_ref(),
+                Kind::Backup => Some(path) != newest_backup.as_ref(),
+            };
+            if drop {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
+
+        // Apply the recovery action described in the table at the header.
+        if let Some(backup) = newest_backup {
+            // Revert is the safer default when both states survived:
+            // the previous version is the only one we know the user has
+            // already exercised, while the `.new-*` content is
+            // validated-but-not-yet-running.
+            let _ = fs::rename(&backup, &final_dir);
+            if let Some(new) = newest_new {
+                let _ = fs::remove_dir_all(&new);
+            }
+        } else if let Some(new) = newest_new {
+            let _ = fs::rename(&new, &final_dir);
+        }
+        // else: only `.tmp-*` left; already removed above.
+    }
 }
 
 fn fetch_npm(
@@ -1925,13 +2094,28 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
         {
             updates += 1;
         }
+        // The UI's per-row "有更新" badge checks `row.latest_version` for
+        // truthiness rather than re-running the version comparison, so we
+        // hide the field whenever the recorded "latest" is no longer
+        // newer than what the user actually installed. Without this the
+        // row keeps the badge after a successful update (latest ==
+        // installed) and after `update()`'s explicit `latest_version =
+        // installed_version` sync. The top-level count above already
+        // does the same filter for the `N 个更新` pill.
+        let row_latest = item
+            .latest_version
+            .as_deref()
+            .filter(|l| {
+                is_newer_than(l, &item.installed_version, &item.origin, item.pinned)
+            })
+            .map(|s| s.to_string());
         rows.push(PluginRow {
             id: item.id.clone(),
             name: item.name.clone(),
             origin: item.origin.clone(),
             source: item.source.clone(),
             installed_version: item.installed_version.clone(),
-            latest_version: item.latest_version.clone(),
+            latest_version: row_latest,
             pinned: item.pinned,
             desired_mode: item.mode.clone(),
             actual_mode,
@@ -2439,5 +2623,241 @@ mod tests {
         assert!(!view.rows[0].synced);
         assert_eq!(view.updates, 1);
         assert_eq!(view.rows[0].latest_version.as_deref(), Some("3.0.0"));
+    }
+
+    /// After `update()` syncs `latest_version = installed_version`, the UI
+    /// should not render a "有更新" badge. The `status()` row must hide
+    /// `latest_version` so the per-row UI check (truthy on the field)
+    /// stops showing the ghost notification. Top-level count is already
+    /// filtered separately.
+    #[test]
+    fn status_hides_latest_when_not_newer_than_installed() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        upsert_item(
+            &data_dir,
+            StoreItem {
+                id: "synced-plugin".into(),
+                name: "synced-plugin".into(),
+                origin: "npm".into(),
+                source: "synced-plugin".into(),
+                installed_version: "1.2.3".into(),
+                latest_version: Some("1.2.3".into()),
+                mode: "link".into(),
+                pinned: false,
+                installed_at: String::new(),
+                updated_at: String::new(),
+                repo_url: None,
+                description: None,
+            },
+        )
+        .expect("save");
+        let settings = settings::Settings::default();
+        let view = status(&data_dir, &settings);
+        assert_eq!(view.updates, 0);
+        assert!(
+            view.rows[0].latest_version.is_none(),
+            "row.latest_version must be hidden when it equals installed_version, got {:?}",
+            view.rows[0].latest_version
+        );
+    }
+
+    #[test]
+    fn status_keeps_latest_when_newer_than_installed() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        upsert_item(
+            &data_dir,
+            StoreItem {
+                id: "behind-plugin".into(),
+                name: "behind-plugin".into(),
+                origin: "npm".into(),
+                source: "behind-plugin".into(),
+                installed_version: "1.0.0".into(),
+                latest_version: Some("2.0.0".into()),
+                mode: "link".into(),
+                pinned: false,
+                installed_at: String::new(),
+                updated_at: String::new(),
+                repo_url: None,
+                description: None,
+            },
+        )
+        .expect("save");
+        let settings = settings::Settings::default();
+        let view = status(&data_dir, &settings);
+        assert_eq!(view.updates, 1);
+        assert_eq!(view.rows[0].latest_version.as_deref(), Some("2.0.0"));
+    }
+
+    /// Helper: stamp a `.dsh-id` marker inside a staging dir so the
+    /// recovery scan can group it with the corresponding `final_dir`.
+    fn mark_staging(dir: &Path, id: &str) {
+        fs::create_dir_all(dir).expect("mkdir staging");
+        fs::write(dir.join(ID_MARKER), format!("{id}\n")).expect("write marker");
+    }
+
+    fn write_fake_plugin(dir: &Path, tag: &str) {
+        fs::create_dir_all(dir).expect("mkdir plugin");
+        let pkg = format!(
+            r#"{{"name":"p","version":"{tag}","main":"lib/index.js"}}"#
+        );
+        fs::write(dir.join("package.json"), pkg).expect("manifest");
+        fs::create_dir_all(dir.join("lib")).expect("lib");
+        fs::write(dir.join("lib/index.js"), "module.exports={}").expect("entry");
+    }
+
+    #[test]
+    fn reconcile_is_noop_when_no_staging_dirs() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+        // Live plugin with no staging around it.
+        write_fake_plugin(&store.join("live-plugin"), "1.0.0");
+        reconcile_store(&data_dir);
+        assert!(store.join("live-plugin").is_dir());
+        let entries: Vec<_> = fs::read_dir(&store)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                n.starts_with(TMP_PREFIX)
+                    || n.starts_with(NEW_PREFIX)
+                    || n.starts_with(BACKUP_PREFIX)
+            })
+            .collect();
+        assert!(entries.is_empty(), "no staging should remain");
+    }
+
+    #[test]
+    fn reconcile_reverts_to_backup_when_final_missing_and_both_staging_present() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+
+        // Crash between `final → backup` and `new → final`: final_dir
+        // missing, both backup (old) and new (validated) survive.
+        let id = "p";
+        mark_staging(&store.join(format!("{BACKUP_PREFIX}1-1")), id);
+        write_fake_plugin(&store.join(format!("{BACKUP_PREFIX}1-1")), "1.0.0");
+        mark_staging(&store.join(format!("{NEW_PREFIX}2-2")), id);
+        write_fake_plugin(&store.join(format!("{NEW_PREFIX}2-2")), "2.0.0");
+
+        reconcile_store(&data_dir);
+
+        // Revert: the backup wins, the new staging is discarded.
+        let final_dir = store.join(id);
+        let final_manifest = fs::read_to_string(final_dir.join("package.json")).unwrap();
+        assert!(
+            final_manifest.contains("\"version\":\"1.0.0\""),
+            "expected revert to old version, got: {final_manifest}"
+        );
+        assert!(!store.join(format!("{NEW_PREFIX}2-2")).exists());
+        assert!(!store.join(format!("{BACKUP_PREFIX}1-1")).exists());
+    }
+
+    #[test]
+    fn reconcile_promotes_new_when_only_new_survives() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+
+        // Crash after `tmp → new` but before `final → backup`: final
+        // missing, only `.new-*` survives. Recovery publishes it.
+        let id = "p";
+        mark_staging(&store.join(format!("{NEW_PREFIX}3-3")), id);
+        write_fake_plugin(&store.join(format!("{NEW_PREFIX}3-3")), "2.5.0");
+
+        reconcile_store(&data_dir);
+
+        let final_dir = store.join(id);
+        let final_manifest = fs::read_to_string(final_dir.join("package.json")).unwrap();
+        assert!(
+            final_manifest.contains("\"version\":\"2.5.0\""),
+            "expected publish of new version, got: {final_manifest}"
+        );
+        assert!(!store.join(format!("{NEW_PREFIX}3-3")).exists());
+    }
+
+    #[test]
+    fn reconcile_discards_tmp_only() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+
+        // Crash mid-fetch before validation: only `.tmp-*` survives.
+        let id = "p";
+        mark_staging(&store.join(format!("{TMP_PREFIX}4-4")), id);
+        write_fake_plugin(&store.join(format!("{TMP_PREFIX}4-4")), "0.0.1");
+
+        reconcile_store(&data_dir);
+
+        assert!(!store.join(format!("{TMP_PREFIX}4-4")).exists());
+        assert!(!store.join(id).exists());
+    }
+
+    #[test]
+    fn reconcile_cleans_stale_staging_when_live_plugin_present() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+
+        // Live plugin exists; an old `.backup-*` from a completed update
+        // was left behind (post-publish cleanup didn't run). Recovery
+        // discards it.
+        let id = "live";
+        write_fake_plugin(&store.join(id), "3.0.0");
+        mark_staging(&store.join(format!("{BACKUP_PREFIX}5-5")), id);
+        write_fake_plugin(&store.join(format!("{BACKUP_PREFIX}5-5")), "2.0.0");
+        mark_staging(&store.join(format!("{NEW_PREFIX}6-6")), id);
+        write_fake_plugin(&store.join(format!("{NEW_PREFIX}6-6")), "3.0.0");
+
+        reconcile_store(&data_dir);
+
+        assert!(store.join(id).is_dir());
+        assert!(!store.join(format!("{BACKUP_PREFIX}5-5")).exists());
+        assert!(!store.join(format!("{NEW_PREFIX}6-6")).exists());
+    }
+
+    #[test]
+    fn reconcile_picks_newest_when_multiple_staging_dirs_share_id() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+
+        // Two failed updates interleaved: final missing, two backups and
+        // two news survive for the same id. The freshest (lex-largest
+        // suffix) wins; the older peer is removed.
+        let id = "p";
+        mark_staging(&store.join(format!("{BACKUP_PREFIX}1-1")), id);
+        write_fake_plugin(&store.join(format!("{BACKUP_PREFIX}1-1")), "0.9.0");
+        mark_staging(&store.join(format!("{BACKUP_PREFIX}2-2")), id);
+        write_fake_plugin(&store.join(format!("{BACKUP_PREFIX}2-2")), "1.0.0");
+        mark_staging(&store.join(format!("{NEW_PREFIX}3-3")), id);
+        write_fake_plugin(&store.join(format!("{NEW_PREFIX}3-3")), "1.5.0");
+        mark_staging(&store.join(format!("{NEW_PREFIX}4-4")), id);
+        write_fake_plugin(&store.join(format!("{NEW_PREFIX}4-4")), "2.0.0");
+
+        reconcile_store(&data_dir);
+
+        // Both news exist -> revert to the freshest backup (id 2-2);
+        // both news removed.
+        let final_dir = store.join(id);
+        let final_manifest = fs::read_to_string(final_dir.join("package.json")).unwrap();
+        assert!(
+            final_manifest.contains("\"version\":\"1.0.0\""),
+            "expected freshest backup as the revert target, got: {final_manifest}"
+        );
+        assert!(!store.join(format!("{BACKUP_PREFIX}1-1")).exists());
+        assert!(!store.join(format!("{BACKUP_PREFIX}2-2")).exists());
+        assert!(!store.join(format!("{NEW_PREFIX}3-3")).exists());
+        assert!(!store.join(format!("{NEW_PREFIX}4-4")).exists());
     }
 }

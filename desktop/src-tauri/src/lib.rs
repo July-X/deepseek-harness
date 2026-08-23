@@ -40,6 +40,14 @@ pub fn run() {
                 running: Mutex::new(None),
                 node_cache: Mutex::new(None),
             });
+            // Crash-recover any plugin-store staging dirs left behind by
+            // an earlier shell run that died mid-update. The recovery is
+            // a single read_dir scan on the happy path (no leftovers =
+            // nothing to do) so it is safe to run unconditionally here
+            // rather than gating on a marker file. Must run before any
+            // plugin command touches the store, which it does not yet at
+            // setup time.
+            plugins::reconcile_store(&app.state::<AppState>().data_dir);
             updater::spawn_background_check(app.handle());
             Ok(())
         })
