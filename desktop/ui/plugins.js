@@ -3,7 +3,9 @@
 // Plugin management card: renders the central store, drives
 // install/update/uninstall/sync, and surfaces update reminders.
 // Loaded after app.js; reuses its helpers ($, invoke, toast, setBusy,
-// setProgress, hideProgress, resetInstallLog, appendInstallLog, installFailed).
+// setProgress, hideProgress, resetInstallLog, appendInstallLog, installFailed,
+// el, mkBtn, armConfirm). withPluginProgress is shared back with app.js,
+// whose kernel install runs through it.
 
 let pluginView = null;
 let catalogItems = [];
@@ -62,20 +64,21 @@ function installedKeys() {
   return keys;
 }
 
-function isInstalled(item) {
-  const keys = installedKeys();
+// keys comes from the caller: each render pass builds the Set once via
+// installedKeys() instead of re-running the repo_url regexes per item.
+function isInstalled(item, keys) {
   if (keys.has(String(item.name || '').toLowerCase())) return true;
   return item.repo ? keys.has(item.repo.toLowerCase()) : false;
 }
 
-function filteredCatalog() {
+function filteredCatalog(keys) {
   const q = $('catalogQuery').value.trim().toLowerCase();
   const filter = $('catalogFilter').value;
   const sort = $('catalogSort').value;
   let items = catalogItems.filter((item) => {
     if (catalogCategory !== 'all' && item.category !== catalogCategory) return false;
-    if (filter === 'installed' && !isInstalled(item)) return false;
-    if (filter === 'not-installed' && isInstalled(item)) return false;
+    if (filter === 'installed' && !isInstalled(item, keys)) return false;
+    if (filter === 'not-installed' && isInstalled(item, keys)) return false;
     if (!q) return true;
     const hay = [item.name, item.description, item.repo, item.category, categoryLabel(item.category)]
       .concat(item.tags || [])
@@ -122,92 +125,55 @@ function renderCatalogCats() {
   });
 }
 
-function renderCatalogCard(item) {
-  const card = document.createElement('div');
-  card.className = 'catalog-card';
-
-  const head = document.createElement('div');
-  head.className = 'catalog-card-head';
-
-  const title = document.createElement('span');
-  title.className = 'catalog-title';
-  const name = document.createElement('span');
-  name.className = 'catalog-name';
-  name.textContent = item.name;
-  title.appendChild(name);
+function renderCatalogCard(item, keys) {
+  const card = el('div', 'catalog-card');
+  const head = el('div', 'catalog-card-head');
+  const title = el('span', 'catalog-title');
+  title.appendChild(el('span', 'catalog-name', item.name));
   if (item.version) {
-    const ver = document.createElement('span');
-    ver.className = 'badge';
-    ver.textContent = item.version;
-    title.appendChild(ver);
+    title.appendChild(el('span', 'badge', item.version));
   }
   if (item.category) {
-    const cat = document.createElement('span');
-    cat.className = 'badge cat';
-    cat.textContent = categoryLabel(item.category);
-    title.appendChild(cat);
+    title.appendChild(el('span', 'badge cat', categoryLabel(item.category)));
   }
   if (item.verified) {
-    const v = document.createElement('span');
-    v.className = 'badge installed';
-    v.textContent = '已验证';
-    title.appendChild(v);
+    title.appendChild(el('span', 'badge installed', '已验证'));
   }
   head.appendChild(title);
 
-  const stats = document.createElement('span');
-  stats.className = 'catalog-stats';
   const parts = [];
   if (item.stars > 0) parts.push('★ ' + formatCount(item.stars));
   if (item.forks > 0) parts.push('Fork ' + formatCount(item.forks));
   const updated = formatUpdated(item.updated);
   if (updated) parts.push(updated);
-  stats.textContent = parts.join(' · ');
-  head.appendChild(stats);
+  head.appendChild(el('span', 'catalog-stats', parts.join(' · ')));
   card.appendChild(head);
 
   if (item.description) {
-    const desc = document.createElement('p');
-    desc.className = 'catalog-desc';
-    desc.textContent = item.description.length > 140 ? item.description.slice(0, 137) + '…' : item.description;
-    card.appendChild(desc);
+    card.appendChild(el('p', 'catalog-desc',
+      item.description.length > 140 ? item.description.slice(0, 137) + '…' : item.description));
   }
 
-  const foot = document.createElement('div');
-  foot.className = 'catalog-card-foot';
-  const tags = document.createElement('span');
-  tags.className = 'catalog-tags';
+  const foot = el('div', 'catalog-card-foot');
+  const tags = el('span', 'catalog-tags');
   (item.tags || []).slice(0, 4).forEach((tag) => {
-    const t = document.createElement('span');
-    t.className = 'tag';
-    t.textContent = tag;
-    tags.appendChild(t);
+    tags.appendChild(el('span', 'tag', tag));
   });
   foot.appendChild(tags);
 
-  const actions = document.createElement('span');
-  actions.className = 'catalog-actions';
+  const actions = el('span', 'catalog-actions');
   const detailUrl = item.detail_url || (item.repo ? 'https://github.com/' + item.repo : '');
   if (detailUrl) {
-    const detail = document.createElement('button');
-    detail.type = 'button';
-    detail.className = 'ghost';
-    detail.textContent = '打开详情';
-    detail.addEventListener('click', () => openExternal(detailUrl));
-    actions.appendChild(detail);
+    actions.appendChild(mkBtn('打开详情', () => openExternal(detailUrl), 'ghost'));
   }
-  const installed = isInstalled(item);
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  if (installed) {
-    btn.className = 'ghost';
-    btn.textContent = '已安装';
+  if (isInstalled(item, keys)) {
+    const btn = el('button', 'ghost', '已安装');
+    btn.type = 'button';
     btn.disabled = true;
+    actions.appendChild(btn);
   } else {
-    btn.textContent = '安装';
-    btn.addEventListener('click', () => installPlugin(item.spec));
+    actions.appendChild(mkBtn('安装', () => installPlugin(item.spec)));
   }
-  actions.appendChild(btn);
   foot.appendChild(actions);
   card.appendChild(foot);
   return card;
@@ -223,7 +189,8 @@ function renderCatalog() {
     list.appendChild(p);
     return;
   }
-  const items = filteredCatalog();
+  const keys = installedKeys();
+  const items = filteredCatalog(keys);
   const verified = catalogItems.filter((i) => i.verified).length;
   $('catalogCount').textContent = catalogItems.length
     ? '结果 ' + items.length + ' 条 · 收录 ' + catalogItems.length + ' 款 · 已验证 ' + verified + ' 款'
@@ -234,7 +201,7 @@ function renderCatalog() {
     p.textContent = catalogItems.length ? '没有匹配的插件，换个关键词或分类试试。' : '目录为空或加载失败，点「刷新目录」重试。';
     list.appendChild(p);
   } else {
-    items.slice(0, catalogShown).forEach((item) => list.appendChild(renderCatalogCard(item)));
+    items.slice(0, catalogShown).forEach((item) => list.appendChild(renderCatalogCard(item, keys)));
   }
   $('btnCatalogMore').classList.toggle('hidden', items.length <= catalogShown);
 }
@@ -289,26 +256,14 @@ function renderPluginList() {
   list.innerHTML = '';
   const view = pluginView;
   if (!view || !view.rows || view.rows.length === 0) {
-    const p = document.createElement('p');
-    p.className = 'muted';
-    p.textContent = '尚未安装任何插件。';
-    list.appendChild(p);
+    list.appendChild(el('p', 'muted', '尚未安装任何插件。'));
     return;
   }
   view.rows.forEach((row) => {
-    const item = document.createElement('div');
-    item.className = 'installed-row plugin-row';
+    const item = el('div', 'installed-row plugin-row');
+    const info = el('span', 'plugin-info');
+    info.appendChild(el('span', 'release-ver', row.name));
 
-    const info = document.createElement('span');
-    info.className = 'plugin-info';
-
-    const name = document.createElement('span');
-    name.className = 'release-ver';
-    name.textContent = row.name;
-    info.appendChild(name);
-
-    const meta = document.createElement('span');
-    meta.className = 'plugin-meta';
     const pinNote = row.pinned ? ' · 已锁定版本' : '';
     // `installed_version` always carries whatever prefix the source
     // provides; for git that's usually `v<hash>` or `v<tag>`, for npm
@@ -317,80 +272,46 @@ function renderPluginList() {
     // action-area "有更新" badge stops repeating the prefix.
     const installed = (row.origin === 'npm' ? 'npm' : 'git') + ' · ' + row.installed_version;
     const upgrade = row.latest_version ? ' → ' + row.latest_version : '';
-    meta.textContent = installed + upgrade + pinNote;
-    info.appendChild(meta);
+    info.appendChild(el('span', 'plugin-meta', installed + upgrade + pinNote));
     item.appendChild(info);
 
-    const actions = document.createElement('span');
-    actions.className = 'release-actions plugin-actions';
+    const actions = el('span', 'release-actions plugin-actions');
 
     if (row.actual_mode === 'copy') {
-      const badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.textContent = '复制';
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge', '复制'));
     } else if (row.actual_mode === 'link') {
-      const badge = document.createElement('span');
-      badge.className = 'badge installed';
-      badge.textContent = '链接';
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge installed', '链接'));
     }
     if (row.synced && row.wired) {
-      const badge = document.createElement('span');
-      badge.className = 'badge installed';
-      badge.textContent = '已同步';
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge installed', '已同步'));
     } else if (pluginView && pluginView.active_kernel && !row.synced) {
-      const badge = document.createElement('span');
-      badge.className = 'badge warn';
-      badge.textContent = '待同步';
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge warn', '待同步'));
     }
     if (!row.wired && pluginView && pluginView.active_kernel) {
-      const badge = document.createElement('span');
-      badge.className = 'badge warn';
-      badge.textContent = '待接线';
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge warn', '待接线'));
     }
     if (!pluginView || !pluginView.active_kernel) {
-      const badge = document.createElement('span');
-      badge.className = 'badge warn';
-      badge.textContent = '无活动内核';
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge warn', '无活动内核'));
     }
     if (row.latest_version) {
-      const badge = document.createElement('span');
-      badge.className = 'badge update';
-      badge.textContent = '有更新 ' + row.latest_version;
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge update', '有更新 ' + row.latest_version));
       if (!row.pinned) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.textContent = '更新';
-        btn.addEventListener('click', () => updatePlugin(row.id));
-        actions.appendChild(btn);
+        actions.appendChild(mkBtn('更新', () => updatePlugin(row.id)));
       }
     }
-    const mode = document.createElement('button');
-    mode.type = 'button';
-    mode.className = 'ghost';
-    mode.textContent = row.desired_mode === 'copy' ? '切换为链接' : '切换为复制';
-    mode.addEventListener('click', () => setPluginMode(row.id, row.desired_mode === 'copy' ? 'link' : 'copy'));
-    actions.appendChild(mode);
+    actions.appendChild(mkBtn(
+      row.desired_mode === 'copy' ? '切换为链接' : '切换为复制',
+      () => setPluginMode(row.id, row.desired_mode === 'copy' ? 'link' : 'copy'),
+      'ghost'
+    ));
     if (row.repo_url) {
-      const repo = document.createElement('button');
-      repo.type = 'button';
-      repo.className = 'ghost';
-      repo.textContent = '仓库';
-      repo.addEventListener('click', () => openExternal(row.repo_url));
-      actions.appendChild(repo);
+      actions.appendChild(mkBtn('仓库', () => openExternal(row.repo_url), 'ghost'));
     }
-    const rm = document.createElement('button');
-    rm.type = 'button';
-    rm.className = 'danger';
-    rm.textContent = '卸载';
-    rm.addEventListener('click', (ev) => armPluginRemove(row.id, ev.currentTarget));
-    actions.appendChild(rm);
+    actions.appendChild(mkBtn('卸载', (ev) => armConfirm(ev.currentTarget, {
+      armedLabel: '确认卸载？',
+      idleLabel: '卸载',
+      onConfirm: (btn) => proceedPluginRemove(row.id, btn),
+    }), 'danger'));
 
     item.appendChild(actions);
     list.appendChild(item);
@@ -402,6 +323,8 @@ function renderPluginList() {
 function withPluginProgress(labels, task) {
   const channel = new core.Channel();
   channel.onmessage = (msg) => {
+    // Stage messages from the install commands start with a CJK sentence;
+    // raw pnpm log lines arrive verbatim and go to the scrolling log area.
     appendInstallLog(msg);
     setProgress(msg.length > 60 ? msg.slice(0, 57) + '…' : msg);
   };
@@ -410,15 +333,19 @@ function withPluginProgress(labels, task) {
   setProgress(labels.start);
   return invoke(labels.cmd, task(channel))
     .then(() => {
-      toast(labels.done);
+      // Callers like updatePlugin show their own success toast afterwards.
+      if (labels.done) {
+        toast(labels.done);
+      }
       return refreshAll();
     })
     .catch((e) => {
+      const failLabel = labels.fail || '操作失败';
       installFailed = true;
-      setProgress(labels.fail + '：' + e);
+      setProgress(failLabel + '：' + e);
       $('progressActions').classList.remove('hidden');
-      appendInstallLog('—— ' + labels.fail + '：' + e + ' ——');
-      toast('操作失败，详情见进度窗口与日志', 6000);
+      appendInstallLog('—— ' + failLabel + '：' + e + ' ——');
+      toast(labels.failToast || '操作失败，详情见进度窗口与日志', 6000);
       return refreshAll();
     })
     .finally(() => {
@@ -489,29 +416,6 @@ function syncPlugins() {
   );
 }
 
-let pendingPluginRemove = null;
-let pendingPluginRemoveTimer = null;
-
-function armPluginRemove(id, btn) {
-  if (pendingPluginRemove === id) {
-    clearTimeout(pendingPluginRemoveTimer);
-    pendingPluginRemove = null;
-    btn.classList.remove('armed');
-    proceedPluginRemove(id, btn);
-    return;
-  }
-  pendingPluginRemove = id;
-  btn.textContent = '确认卸载？';
-  btn.classList.add('armed');
-  pendingPluginRemoveTimer = setTimeout(() => {
-    btn.textContent = '卸载';
-    btn.classList.remove('armed');
-    if (pendingPluginRemove === id) {
-      pendingPluginRemove = null;
-    }
-  }, 3200);
-}
-
 function proceedPluginRemove(id, btn) {
   btn.disabled = true;
   return withPluginProgress(
@@ -525,22 +429,31 @@ function proceedPluginRemove(id, btn) {
   );
 }
 
-function checkPluginUpdates(silent) {
-  setBusy(true);
+// Manual checks pass { busy: true, toastOnUpdates: true }; the startup
+// self-check stays silent on errors and skips the busy lock.
+function checkPluginUpdates(opts) {
+  if (opts.busy) {
+    setBusy(true);
+  }
   return invoke('plugin_check_updates')
     .then((infos) => {
       const n = (infos || []).filter((i) => i.latest).length;
-      if (n > 0 && !silent) {
+      if (n > 0 && opts.toastOnUpdates) {
         toast('有 ' + n + ' 个插件可更新', 5000);
       }
       return refreshAll();
     })
     .catch((e) => {
-      if (!silent) {
+      // 静默路径（启动自检）失败不打扰用户，只有手动检查才弹错误。
+      if (opts.busy) {
         toast('检查插件更新失败：' + e, 6000);
       }
     })
-    .finally(() => setBusy(false));
+    .finally(() => {
+      if (opts.busy) {
+        setBusy(false);
+      }
+    });
 }
 
 function openExternal(url) {
@@ -552,7 +465,7 @@ function openExternal(url) {
 // --- wiring ---------------------------------------------------------------
 
 $('btnPluginInstall').addEventListener('click', () => installPlugin(''));
-$('btnPluginCheck').addEventListener('click', () => checkPluginUpdates(false));
+$('btnPluginCheck').addEventListener('click', () => checkPluginUpdates({ busy: true, toastOnUpdates: true }));
 $('btnPluginSync').addEventListener('click', syncPlugins);
 $('btnCatalogReload').addEventListener('click', () => loadCatalog(true));
 $('btnCatalogMore').addEventListener('click', () => {
@@ -594,7 +507,9 @@ window.__dshPluginsRefresh = () => {
         renderCatalog();
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      // 静默刷新：插件状态读取失败时保留旧卡片，下次 refreshAll 再试。
+    });
 };
 
 // 启动后预载社区目录（静默，失败不打断：用户可在插件中心手动刷新）
@@ -604,13 +519,5 @@ setTimeout(() => {
 
 // 启动后静默检查一次插件更新，有新版时提醒
 setTimeout(() => {
-  invoke('plugin_check_updates')
-    .then((infos) => {
-      const n = (infos || []).filter((i) => i.latest).length;
-      if (n > 0) {
-        toast('有 ' + n + ' 个插件可更新', 6000);
-      }
-      return window.__dshPluginsRefresh ? window.__dshPluginsRefresh() : null;
-    })
-    .catch(() => {});
+  checkPluginUpdates({ busy: false, toastOnUpdates: true });
 }, 3500);

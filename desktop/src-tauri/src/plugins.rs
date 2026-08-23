@@ -25,8 +25,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::process::quiet;
+use crate::releases::{http_get_bytes, http_get_string};
 use crate::version::cmp_versions;
-use crate::{commands, kernel, settings};
+use crate::{commands, kernel, node, settings};
 
 /// Default profile the shell wires plugins into (the kernel's web surface).
 pub const DEFAULT_PROFILE: &str = "web";
@@ -55,8 +56,6 @@ const SPEC_LINK: &str = "link:";
 const SPEC_FILE: &str = "file:";
 /// Marker of shell-written dependency specs pointing at a kernel plugins dir.
 const WIRED_MARK: &str = "desktop/kernels/";
-
-const USER_AGENT: &str = concat!("dsh-desktop/", env!("CARGO_PKG_VERSION"));
 
 // --- data model ------------------------------------------------------------
 
@@ -340,14 +339,21 @@ fn save_store(data_dir: &Path, store: &Store) -> Result<(), AppError> {
 /// Write a local .npmrc in the store directory.  Fresh pnpm defaults a
 /// `minimumReleaseAge` of ~3 days so locked dev/rc versions stay installable
 /// without waiting out the gate, and pins the registry mirror the desktop
-/// shell already uses so mirror-only scoped packages resolve.  Replaces any
-/// existing file so a previous (broken) shape gets corrected in place.
+/// shell already uses so mirror-only scoped packages resolve.  Rewrites any
+/// differing content so a previous (broken) shape gets corrected in place;
+/// `save_store` calls this on every mutation, so matching content is left
+/// untouched to avoid the disk churn.
 fn ensure_store_npmrc(data_dir: &Path) -> Result<(), AppError> {
     let npmrc = store_dir(data_dir).join(".npmrc");
     let registry = crate::registry::npm_registry_base();
-    let text = format!(
-        "minimumReleaseAge=0\nregistry={registry}\n@deepseek-ai:registry={registry}\n"
-    );
+    let text =
+        format!("minimumReleaseAge=0\nregistry={registry}\n@deepseek-ai:registry={registry}\n");
+    if fs::read_to_string(&npmrc)
+        .map(|existing| existing == text)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
     fs::write(&npmrc, text).map_err(|e| AppError::Io(e.to_string()))?;
     Ok(())
 }
@@ -560,27 +566,8 @@ fn run_capture(program: &str, args: &[&str]) -> io::Result<(bool, String)> {
 /// Fetch the npm registry document for a package.
 fn fetch_npm_doc(name: &str) -> Result<NpmDoc, String> {
     let url = format!("{}{}", crate::registry::npm_registry_base(), name);
-    let mut response = ureq::get(&url)
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e: ureq::Error| e.to_string())?;
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e: ureq::Error| e.to_string())?;
+    let body = http_get_string(&url, None)?;
     serde_json::from_str(&body).map_err(|e: serde_json::Error| e.to_string())
-}
-
-/// Download a tarball into a byte vector.
-fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let mut response = ureq::get(url)
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e: ureq::Error| e.to_string())?;
-    response
-        .body_mut()
-        .read_to_vec()
-        .map_err(|e: ureq::Error| e.to_string())
 }
 
 /// Extract a tgz into dest, stripping the leading package/ segment. Uses the
@@ -713,7 +700,7 @@ fn fetch_npm(
             ))
         })?;
     on_progress(&format!("正在下载 {}@{version} …", spec.source));
-    let bytes = fetch_bytes(&tarball).map_err(|e| AppError::Plugin(format!("下载失败：{e}")))?;
+    let bytes = http_get_bytes(&tarball).map_err(|e| AppError::Plugin(format!("下载失败：{e}")))?;
     let tgz = dest.join(".pkg.tgz");
     fs::write(&tgz, bytes).map_err(|e| AppError::Io(e.to_string()))?;
     extract_tarball(&tgz, &dest.join("package"))
@@ -832,24 +819,14 @@ fn build_git_plugin(
         "install",
         "--ignore-workspace",
         "--config.node-linker=hoisted",
-        "--reporter=append-only",
-        // pnpm 11+ refuses to silently skip a transitive dependency's
-        // build script: `ERR_PNPM_IGNORED_BUILDS` turns into a non-zero
-        // exit code even when the parent `prepare` ran fine and emitted
-        // `lib/`. Plugins commonly pull in something like `node-pty`
-        // whose native compile we don't actually need here — the
-        // project's own `tsdown` step has already produced the entry.
-        "--config.strict-dep-builds=false",
+        kernel::PNPM_REPORTER,
+        kernel::PNPM_NO_STRICT_DEP_BUILDS,
         "--config.enable-pre-post-scripts=true",
     ];
     // pnpm runs the package's `prepare` lifecycle script automatically after
     // install when enable-pre-post-scripts is on.
-    let status =
-        kernel::run_pnpm(pnpm_exe, &args, dest, &log_path, &mut *on_progress).map_err(|e| {
-            AppError::Io(format!(
-                "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
-            ))
-        })?;
+    let status = kernel::run_pnpm(pnpm_exe, &args, dest, &log_path, &mut *on_progress)
+        .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() {
         return Err(AppError::Plugin(format!(
             "插件构建失败（退出码 {:?}）：`prepare` 未成功生成入口。详情见 {}",
@@ -970,18 +947,11 @@ fn install_store_deps(
         "install",
         "--ignore-workspace",
         "--config.node-linker=hoisted",
-        "--reporter=append-only",
-        // See `build_git_plugin`: pnpm 11+'s default ignored-builds
-        // accounting turns into exit code 1 here too, even when the
-        // node_modules tree is fine.
-        "--config.strict-dep-builds=false",
+        kernel::PNPM_REPORTER,
+        kernel::PNPM_NO_STRICT_DEP_BUILDS,
     ];
-    let status =
-        kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut *on_progress).map_err(|e| {
-            AppError::Io(format!(
-                "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
-            ))
-        })?;
+    let status = kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut *on_progress)
+        .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() && !dir.join("node_modules").is_dir() {
         return Err(AppError::Plugin(format!(
             "插件依赖安装失败（退出码 {:?}），详情见日志：{}",
@@ -1312,17 +1282,15 @@ pub fn ensure_wiring(
     }
     on_progress("正在同步 profile 依赖（pnpm install）");
     let log_path = wiring_log_path(data_dir);
+    // The profile's install only needs a usable node_modules, which the
+    // existing fallback already tolerates when wiring is unchanged, so
+    // silence pnpm's ignored-builds false positive here.
     let status = kernel::run_pnpm(
         pnpm_exe,
-        // See `build_git_plugin`: pnpm 11+'s default ignored-builds
-        // accounting turns into exit code 1 even when resolution is
-        // healthy. The profile's install only needs a usable
-        // node_modules, which the existing fallback already tolerates
-        // when wiring is unchanged, so silence the false positive here.
         &[
             "install",
-            "--reporter=append-only",
-            "--config.strict-dep-builds=false",
+            kernel::PNPM_REPORTER,
+            kernel::PNPM_NO_STRICT_DEP_BUILDS,
         ],
         &profile,
         &log_path,
@@ -1344,9 +1312,14 @@ pub fn ensure_wiring(
 
 /// Quiet wiring for sync commands (kernel switch / start): failures are
 /// recorded in the store for plugin_status.warning instead of blocking the
-/// action.
-pub fn ensure_wiring_quiet(data_dir: &Path, settings: &settings::Settings) -> Result<(), String> {
-    let (_, pnpm_exe, _) = commands::promise_pnpm(data_dir, |_| {})?;
+/// action. Reuses the caller's cached node probe so the switch never
+/// spawns a second `node --version`.
+pub fn ensure_wiring_quiet(
+    data_dir: &Path,
+    settings: &settings::Settings,
+    node_info: &node::NodeInfo,
+) -> Result<(), String> {
+    let (_, pnpm_exe) = commands::promise_pnpm(data_dir, node_info, |_| {})?;
     let mut noop = |_: &str| {};
     match ensure_wiring(data_dir, settings, &pnpm_exe, &mut noop) {
         Ok(_) => {
@@ -1623,18 +1596,6 @@ fn from_market_raw(raw: CatalogRaw) -> CatalogItem {
     }
 }
 
-/// GET a URL and return the body as text.
-fn fetch_text(url: &str) -> Result<String, String> {
-    let mut response = ureq::get(url)
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e: ureq::Error| e.to_string())?;
-    response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e: ureq::Error| e.to_string())
-}
-
 /// Fetch the community catalog, caching the normalized items for
 /// CATALOG_TTL_SECS (`force` bypasses the cache). The dsh-plugin.org hub is
 /// the primary source; the reference market listing is the fallback when the
@@ -1654,7 +1615,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
             }
         }
     }
-    let hub = fetch_text(HUB_CATALOG_URL).and_then(|body| {
+    let hub = http_get_string(HUB_CATALOG_URL, None).and_then(|body| {
         serde_json::from_str::<Vec<HubRaw>>(&body)
             .map_err(|e: serde_json::Error| e.to_string())
             .map(|raws| raws.into_iter().map(HubRaw::into_item).collect::<Vec<_>>())
@@ -1662,7 +1623,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
     let items = match hub {
         Ok(items) if !items.is_empty() => items,
         _ => {
-            let body = fetch_text(MARKET_CATALOG_URL)?;
+            let body = http_get_string(MARKET_CATALOG_URL, None)?;
             let doc: CatalogDoc =
                 serde_json::from_str(&body).map_err(|e: serde_json::Error| e.to_string())?;
             doc.items.into_iter().map(from_market_raw).collect()

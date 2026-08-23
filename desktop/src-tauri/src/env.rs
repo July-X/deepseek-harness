@@ -17,6 +17,7 @@
 //! before it inherits any other env. Non-Windows platforms are a no-op:
 //! `Command::env` is called with the same value the parent already has.
 
+#[cfg(windows)]
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -25,8 +26,10 @@ use std::sync::OnceLock;
 /// value the User Environment Variable Editor exposes.
 const PATH: &str = "PATH";
 /// Windows registry path holding the user PATH (and friends).
+#[cfg(windows)]
 const REG_USER_ENV: &str = "HKCU\\Environment";
 /// Registry value name for the user PATH.
+#[cfg(windows)]
 const REG_PATH_VALUE: &str = "Path";
 /// `reg.exe` ships at a fixed Windows location and is always on the
 /// system PATH; pinning it removes any chance of an attacker-planted shim
@@ -76,14 +79,14 @@ fn compute_merged_path() -> String {
 /// here it is belt-and-braces.
 #[cfg(windows)]
 fn read_user_path() -> Option<String> {
+    use crate::process::quiet;
     use std::process::Stdio;
-    let output = Command::new(REG_EXE)
-        .args(["query", REG_USER_ENV, "/v", REG_PATH_VALUE])
+    let mut cmd = Command::new(REG_EXE);
+    cmd.args(["query", REG_USER_ENV, "/v", REG_PATH_VALUE])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
+        .stderr(Stdio::piped());
+    let output = quiet(&mut cmd).output().ok()?;
     if !output.status.success() {
         return None;
     }

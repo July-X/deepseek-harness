@@ -84,9 +84,7 @@ pub fn run_with_progress(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let secs = started.elapsed().as_secs();
-                on_progress(&format!(
-                    "… 子进程仍在运行（已进行 {secs} 秒）"
-                ));
+                on_progress(&format!("… 子进程仍在运行（已进行 {secs} 秒）"));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -138,15 +136,8 @@ fn spawn(exe: &Path, args: &[&str], cwd: &Path) -> io::Result<Child> {
 }
 
 fn reap(mut child: Child) -> io::Result<ExitStatus> {
-    #[cfg(windows)]
-    {
-        // `ComSpec /C` makes cmd.exe the direct child and the real program
-        // its grandchild; waiting on cmd only returns after the grandchild
-        // has already exited, so a plain wait is the right thing here.
-        child.wait()
-    }
-    #[cfg(not(windows))]
-    {
-        child.wait()
-    }
+    // On Windows `ComSpec /C` makes cmd.exe the direct child and the real
+    // program its grandchild; waiting on cmd only returns after the
+    // grandchild has already exited, so a plain wait is right everywhere.
+    child.wait()
 }

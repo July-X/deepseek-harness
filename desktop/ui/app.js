@@ -15,17 +15,46 @@ function invoke(cmd, args) {
 
 const $ = (id) => document.getElementById(id);
 
+// Same-value textContent writes still dirty layout, and the status poll
+// re-renders every 2.5s; skip the write when nothing changed.
+function setText(id, s) {
+  const node = $(id);
+  if (node.textContent !== s) {
+    node.textContent = s;
+  }
+}
+
+// createElement + className + textContent in one call; mkBtn adds the
+// type and click handler every button here sets anyway.
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) {
+    node.className = cls;
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+function mkBtn(label, onClick, cls) {
+  const btn = el('button', cls, label);
+  btn.type = 'button';
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
 // --- toast ---------------------------------------------------------------
 
 let toastTimer = null;
 function toast(msg, ms) {
-  const el = $('toast');
-  el.textContent = msg;
-  el.classList.remove('hidden');
+  const toastEl = $('toast');
+  toastEl.textContent = msg;
+  toastEl.classList.remove('hidden');
   if (toastTimer) {
     clearTimeout(toastTimer);
   }
-  toastTimer = setTimeout(() => el.classList.add('hidden'), ms || 3200);
+  toastTimer = setTimeout(() => toastEl.classList.add('hidden'), ms || 3200);
 }
 
 // --- progress --------------------------------------------------------------
@@ -123,6 +152,12 @@ function setBusy(on) {
 
 let releases = [];
 let currentView = null;
+// Last observed kernel running state. refreshAll, waitForRunning, and the
+// polling loop all keep it in sync so only an externally-caused transition
+// to running raises the「内核已就绪」toast (the start orchestration toasts
+// itself); initializing to false alone would misfire when the kernel was
+// already running before this page loaded.
+let lastRunning = false;
 
 function renderStatus(view) {
   currentView = view;
@@ -130,29 +165,28 @@ function renderStatus(view) {
 
   const pill = $('statusPill');
   const dot = $('statusDot');
-  const text = $('statusText');
   if (kernel.running) {
     pill.classList.remove('hidden');
     dot.className = 'dot ok';
-    text.textContent = '运行中';
+    setText('statusText', '运行中');
   } else if (kernel.active && kernel.active_installed) {
     dot.className = 'dot bad';
-    text.textContent = '已停止';
+    setText('statusText', '已停止');
   } else {
     dot.className = '';
-    text.textContent = '未安装';
+    setText('statusText', '未安装');
   }
 
-  $('kernelRunning').textContent = kernel.running ? '运行中' : '未运行';
-  $('kernelActive').textContent = kernel.active || '（未选择）';
-  $('kernelUrl').textContent = kernel.running ? 'http://127.0.0.1:' + kernel.port : '—';
-  $('kernelNode').textContent = node.ok
+  setText('kernelRunning', kernel.running ? '运行中' : '未运行');
+  setText('kernelActive', kernel.active || '（未选择）');
+  setText('kernelUrl', kernel.running ? 'http://127.0.0.1:' + kernel.port : '—');
+  setText('kernelNode', node.ok
     ? [node.path, node.version].filter(Boolean).join('  ')
-    : '未检测到可用 Node（' + node.reason + '）';
-  $('kernelHome').textContent = kernel.dsh_home;
-  $('shellVersion').textContent = 'v' + view.shell_version;
+    : '未检测到可用 Node（' + node.reason + '）');
+  setText('kernelHome', kernel.dsh_home);
+  setText('shellVersion', 'v' + view.shell_version);
 
-  $('updateInstalled').textContent = String((kernel.installed || []).length) + ' 个';
+  setText('updateInstalled', String((kernel.installed || []).length) + ' 个');
 
   // The status poll re-renders every 2.5s; never clobber a field the user
   // is editing right now, or an in-flight edit would silently revert.
@@ -163,9 +197,9 @@ function renderStatus(view) {
     $('setProfile').value = settings.profile || '';
   }
 
-  $('nodeHint').textContent = node.ok
+  setText('nodeHint', node.ok
     ? 'node ' + node.version + ' 满足 dsh 要求（^22.19 || >=24）'
-    : node.reason;
+    : node.reason);
 
   syncWorkbenchButtons();
 }
@@ -183,62 +217,69 @@ let starting = false;
 function syncWorkbenchButtons() {
   const k = currentView && currentView.kernel;
   const toggle = $('btnToggle');
-  // The toggle carries an SVG icon, so the label span owns the text.
-  const toggleLabel = $('btnToggleLabel');
   const openWindow = $('btnOpenWindow');
   const hint = $('startHint');
   const busy = busyButtons.size > 0;
   const running = Boolean(k && k.running);
   const canStart = Boolean(k && k.active && k.active_installed);
 
+  // The toggle carries an SVG icon, so the label span owns the text.
   if (starting) {
     toggle.disabled = true;
-    toggleLabel.textContent = '正在启动…';
+    setText('btnToggleLabel', '正在启动…');
   } else if (running) {
     toggle.disabled = busy;
-    toggleLabel.textContent = '关闭工作台';
+    setText('btnToggleLabel', '关闭工作台');
   } else {
     toggle.disabled = !canStart || busy;
-    toggleLabel.textContent = '启动工作台';
+    setText('btnToggleLabel', '启动工作台');
   }
   openWindow.disabled = !running || starting || busy;
   hint.classList.toggle('hidden', starting || running || canStart);
 }
 
-function badgeFor(version) {
+// installedSet is hoisted by the caller: one Set per render pass instead of
+// one per release row.
+function badgeFor(version, installedSet) {
   const k = currentView && currentView.kernel;
   if (k && k.active === version) {
-    return '<span class="badge active">当前使用</span>';
+    return el('span', 'badge active', '当前使用');
   }
-  if (installedVersions().has(version)) {
-    return '<span class="badge installed">已安装</span>';
+  if (installedSet.has(version)) {
+    return el('span', 'badge installed', '已安装');
   }
-  return '';
+  return null;
 }
 
 // Two-step confirmation for destructive actions: WKWebView does not support
-// window.confirm, so removal uses an in-page armed state instead.
-let pendingRemove = null;
-let pendingRemoveTimer = null;
+// window.confirm, so removal uses an in-page armed state instead. Only one
+// button is armed at a time; arming another resets the previous one.
+let armed = null;
 
-function armRemove(version, btn) {
-  if (pendingRemove === version) {
-    clearTimeout(pendingRemoveTimer);
-    pendingRemove = null;
-    btn.classList.remove('armed');
-    proceedRemove(version, btn);
+function disarmConfirm() {
+  if (!armed) {
     return;
   }
-  pendingRemove = version;
-  btn.textContent = '确认删除？';
+  clearTimeout(armed.timer);
+  armed.btn.textContent = armed.idleLabel;
+  armed.btn.classList.remove('armed');
+  armed = null;
+}
+
+function armConfirm(btn, opts) {
+  if (armed && armed.btn === btn) {
+    // 第二次点击即确认：保持 armed 文案（按钮随即禁用，操作完成后整表重渲染），
+    // 只摘掉 armed 态并执行。
+    clearTimeout(armed.timer);
+    armed.btn.classList.remove('armed');
+    armed = null;
+    opts.onConfirm(btn);
+    return;
+  }
+  disarmConfirm();
+  armed = { btn, idleLabel: opts.idleLabel, timer: setTimeout(disarmConfirm, 3200) };
+  btn.textContent = opts.armedLabel;
   btn.classList.add('armed');
-  pendingRemoveTimer = setTimeout(() => {
-    btn.textContent = '删除';
-    btn.classList.remove('armed');
-    if (pendingRemove === version) {
-      pendingRemove = null;
-    }
-  }, 3200);
 }
 
 function proceedRemove(version, btn) {
@@ -271,41 +312,27 @@ function renderReleases() {
     return;
   }
   list.innerHTML = '';
+  const installedSet = installedVersions();
+  const k = currentView && currentView.kernel;
   releases.forEach((r) => {
-    const row = document.createElement('div');
-    row.className = 'release-row';
+    const row = el('div', 'release-row');
+    const ver = el('span', 'release-ver', r.version);
+    const actions = el('span', 'release-actions');
+    const badge = badgeFor(r.version, installedSet);
+    if (badge) {
+      actions.appendChild(badge);
+    }
 
-    const ver = document.createElement('span');
-    ver.className = 'release-ver';
-    ver.textContent = r.version;
-
-    const actions = document.createElement('span');
-    actions.className = 'release-actions';
-    actions.innerHTML = badgeFor(r.version);
-
-    const k = currentView && currentView.kernel;
-    const installed = installedVersions().has(r.version);
+    const installed = installedSet.has(r.version);
     const isActive = k && k.active === r.version;
-
     if (!installed) {
-      const installBtn = document.createElement('button');
-      installBtn.type = 'button';
-      installBtn.textContent = '安装';
-      installBtn.addEventListener('click', () => installVersion(r.version));
-      actions.appendChild(installBtn);
+      actions.appendChild(mkBtn('安装', () => installVersion(r.version)));
     } else if (!isActive) {
-      const activeBtn = document.createElement('button');
-      activeBtn.type = 'button';
-      activeBtn.textContent = '切换';
-      activeBtn.addEventListener('click', () => activateVersion(r.version));
-      actions.appendChild(activeBtn);
+      actions.appendChild(mkBtn('切换', () => activateVersion(r.version)));
     }
 
     if (r.prerelease) {
-      const pre = document.createElement('span');
-      pre.className = 'badge';
-      pre.textContent = '预发布';
-      actions.appendChild(pre);
+      actions.appendChild(el('span', 'badge', '预发布'));
     }
 
     row.appendChild(ver);
@@ -323,28 +350,18 @@ function renderInstalled() {
   }
   list.innerHTML = '';
   k.installed.forEach((v) => {
-    const row = document.createElement('div');
-    row.className = 'installed-row';
-
-    const ver = document.createElement('span');
-    ver.className = 'release-ver';
-    ver.textContent = v.version;
-
-    const actions = document.createElement('span');
-    actions.className = 'release-actions';
+    const row = el('div', 'installed-row');
+    const ver = el('span', 'release-ver', v.version);
+    const actions = el('span', 'release-actions');
     if (v.active) {
-      const badge = document.createElement('span');
-      badge.className = 'badge active';
-      badge.textContent = '当前使用';
-      actions.appendChild(badge);
+      actions.appendChild(el('span', 'badge active', '当前使用'));
     }
     if (!v.active) {
-      const rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'danger';
-      rm.textContent = '删除';
-      rm.addEventListener('click', (ev) => armRemove(v.version, ev.currentTarget));
-      actions.appendChild(rm);
+      actions.appendChild(mkBtn('删除', (ev) => armConfirm(ev.currentTarget, {
+        armedLabel: '确认删除？',
+        idleLabel: '删除',
+        onConfirm: (btn) => proceedRemove(v.version, btn),
+      }), 'danger'));
     }
 
     row.appendChild(ver);
@@ -358,6 +375,7 @@ function renderInstalled() {
 async function refreshAll() {
   return invoke('get_status')
     .then((view) => {
+      lastRunning = view.kernel.running;
       renderStatus(view);
       renderReleases();
       renderInstalled();
@@ -434,38 +452,19 @@ function installShellUpdate() {
   // On success the app restarts into the new version; nothing else to do.
 }
 
+// installVersion shares the plugin progress plumbing (defined in plugins.js,
+// which loads after this file — fine, it is only called from click handlers).
 function installVersion(version) {
-  const channel = new core.Channel();
-  channel.onmessage = (msg) => {
-    // Stage messages from install_version start with a CJK sentence; raw
-    // pnpm log lines arrive verbatim and go to the scrolling log area.
-    appendInstallLog(msg);
-    setProgress(msg.length > 60 ? msg.slice(0, 57) + '…' : msg);
-  };
-  setBusy(true);
-  resetInstallLog();
-  setProgress('正在安装 ' + version + ' …');
-  invoke('install_kernel', { version, onEvent: channel })
-    .then(() => {
-      toast('版本 ' + version + ' 安装完成');
-      return refreshAll();
-    })
-    .catch((e) => {
-      // Keep the overlay open so the user can read the full log; the close
-      // button appears and the app stays usable after it is clicked.
-      installFailed = true;
-      setProgress('安装失败：' + e);
-      $('progressActions').classList.remove('hidden');
-      appendInstallLog('—— 安装失败：' + e + ' ——');
-      toast('安装失败，详情见进度窗口与日志', 6000);
-      return refreshAll();
-    })
-    .finally(() => {
-      setBusy(false);
-      if (!installFailed) {
-        hideProgress();
-      }
-    });
+  return withPluginProgress(
+    {
+      cmd: 'install_kernel',
+      start: '正在安装 ' + version + ' …',
+      done: '版本 ' + version + ' 安装完成',
+      fail: '安装失败',
+      failToast: '安装失败，详情见进度窗口与日志'
+    },
+    (channel) => ({ version, onEvent: channel })
+  );
 }
 
 function closeProgress() {
@@ -491,6 +490,7 @@ const START_TIMEOUT_MS = 60000;
 
 function waitForRunning(deadline) {
   return invoke('get_status').then((view) => {
+    lastRunning = view.kernel.running;
     renderStatus(view);
     if (view.kernel.running) {
       return true;
@@ -674,10 +674,10 @@ document.querySelectorAll('.menu-item').forEach((item) => {
   });
 });
 
-// Status auto-refresh while a kernel may be coming up.
-let lastRunning = false;
-setInterval(() => {
-  if (!core) {
+// Status auto-refresh while a kernel may be coming up. Hidden windows skip
+// the poll entirely; becoming visible again refreshes immediately.
+function pollStatus() {
+  if (!core || document.hidden) {
     return;
   }
   invoke('get_status')
@@ -690,7 +690,17 @@ setInterval(() => {
         toast('内核已就绪', 2500);
       }
     })
-    .catch(() => {});
-}, 2500);
+    .catch(() => {
+      // 后台轮询读状态失败不打扰用户：面板保留旧值，下个周期自动重试。
+    });
+}
 
-refreshAll().catch(() => {});
+setInterval(pollStatus, 2500);
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    pollStatus();
+  }
+});
+
+refreshAll();

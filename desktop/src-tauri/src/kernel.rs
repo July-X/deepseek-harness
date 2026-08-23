@@ -1,5 +1,4 @@
 //! Kernel lifecycle: installing pinned kernel versions, managing the active
-//! Kernel lifecycle: installing pinned kernel versions, managing the active
 //! version, and starting/stopping the `dsh web` process the shell embeds.
 //!
 //! Shell metadata lives under the harness home, next to the kernel's own
@@ -50,6 +49,8 @@ const KERNEL_BIN_REL: &str = "node_modules/@deepseek-ai/dsh/lib/bin.js";
 pub struct InstalledVersion {
     pub version: String,
     pub active: bool,
+    /// Size of the kernel entry file (`KERNEL_BIN_REL`) only — a cheap
+    /// completeness signal, not the footprint of the whole install.
     pub size_bytes: u64,
 }
 
@@ -290,14 +291,11 @@ pub fn install_version(
         prefix,
         "--ignore-workspace",
         "--config.node-linker=hoisted",
-        "--reporter=append-only",
+        PNPM_REPORTER,
         spec.as_str(),
     ];
-    let status = run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut on_progress).map_err(|e| {
-        AppError::Io(format!(
-            "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
-        ))
-    })?;
+    let status =
+        run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut on_progress).map_err(pnpm_spawn_err)?;
     on_progress("pnpm 已退出，正在校验安装结果");
 
     // pnpm ≥ 10 在存在被忽略的构建脚本（见 `pnpm approve-builds`）时会打印
@@ -327,6 +325,27 @@ pub fn install_version(
         ));
     }
     Ok(())
+}
+
+/// `--reporter=append-only`: pnpm prints one log line per lifecycle event
+/// on stdout, which `run_with_progress` streams to the UI and the log file.
+pub(crate) const PNPM_REPORTER: &str = "--reporter=append-only";
+
+/// `--config.strict-dep-builds=false`: pnpm 11+ refuses to silently skip a
+/// transitive dependency's build script, turning `ERR_PNPM_IGNORED_BUILDS`
+/// into a non-zero exit code even when the produced tree is fine (plugins
+/// commonly pull in something like `node-pty`, whose native compile the
+/// shell never needs). Callers that pass this verify their own artifact
+/// (kernel entry, `node_modules`) instead of trusting the exit code.
+pub(crate) const PNPM_NO_STRICT_DEP_BUILDS: &str = "--config.strict-dep-builds=false";
+
+/// pnpm could not be spawned at all (missing binary, broken PATH) —
+/// distinct from a non-zero exit, which each caller judges against its own
+/// artifact checks.
+pub(crate) fn pnpm_spawn_err(e: io::Error) -> AppError {
+    AppError::Io(format!(
+        "无法运行 pnpm（{e}）。请确认已安装 Node.js 与 pnpm"
+    ))
 }
 
 /// Spawn pnpm once with the given args, piping merged stdout+stderr line by
@@ -439,11 +458,27 @@ pub fn stop(child: &mut Child) -> Result<(), AppError> {
         unsafe {
             libc::kill(-pid, libc::SIGTERM);
         }
-        let _ = child.wait();
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
+        // Poll try_wait instead of a blocking wait(): a child that ignores
+        // SIGTERM would otherwise park stop() here forever and the SIGKILL
+        // below could never run. Same 1-second budget as `kill_pid`.
+        let mut exited = false;
+        for _ in 0..10 {
+            // try_wait only fails on OS-level errors; keep polling and let
+            // the SIGKILL below settle the child either way.
+            if child.try_wait().is_ok_and(|status| status.is_some()) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        let _ = child.try_wait();
+        if !exited {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            // Reap after the kill; a wait error here means the child is
+            // already gone, which is the state we wanted.
+            let _ = child.wait();
+        }
     }
     #[cfg(windows)]
     {

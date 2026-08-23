@@ -16,6 +16,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
+use crate::error::AppError;
 use crate::{kernel, node, plugins, releases, settings, updater};
 
 /// Shared shell state installed as a Tauri managed state.
@@ -38,7 +39,6 @@ pub struct StatusView {
     pub kernel: kernel::KernelStatus,
     pub node: node::NodeInfo,
     pub settings: settings::Settings,
-    pub kernel_log: String,
 }
 
 /// Read a bounded tail of a text file for display.
@@ -63,36 +63,32 @@ fn read_tail(path: &Path, max_bytes: usize) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-fn resolve_node_path(data_dir: &Path) -> Result<PathBuf, String> {
-    let s = settings::load(data_dir);
-    let info = node::resolve(&s);
-    if !info.ok {
-        return Err(info.reason);
-    }
-    Ok(PathBuf::from(info.path))
-}
-
 /// The web-app level error prefix the UI must not swallow.
-fn app_err(app: &AppState, e: impl std::fmt::Display) -> String {
-    format!("{e}（数据目录：{}）", app.data_dir.display())
+fn app_err(data_dir: &Path, e: impl std::fmt::Display) -> String {
+    format!("{e}（数据目录：{}）", data_dir.display())
 }
 
 // --- status ---------------------------------------------------------------
 
 #[tauri::command]
-pub fn get_status(app: AppHandle, state: State<'_, AppState>) -> StatusView {
+pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<StatusView, String> {
     let data_dir = state.data_dir.clone();
-    let settings = settings::load(&data_dir);
-    let kernel_status = kernel::status(&data_dir, &settings);
-    let node_info = cached_node(&state, &settings);
-    let kernel_log = read_tail(&kernel::logs_dir(&data_dir).join("kernel.log"), 8 * 1024);
-    StatusView {
-        shell_version: app.package_info().version.to_string(),
-        kernel: kernel_status,
-        node: node_info,
-        settings,
-        kernel_log,
-    }
+    // File probes and the port check run on a blocking worker: as a sync
+    // command this poll would hold the Tauri main thread every few seconds.
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = settings::load(&data_dir);
+        let kernel_status = kernel::status(&data_dir, &settings);
+        let state = app.state::<AppState>();
+        let node_info = cached_node(&state, &settings);
+        StatusView {
+            shell_version: app.package_info().version.to_string(),
+            kernel: kernel_status,
+            node: node_info,
+            settings,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Resolve the Node runtime through the per-app cache; only a changed
@@ -159,19 +155,26 @@ pub async fn install_shell_update(app: AppHandle, on_event: Channel<String>) -> 
 
 /// Fetch the official kernel release list for the update menu.
 #[tauri::command]
-pub fn fetch_releases() -> Result<releases::ReleaseList, String> {
-    releases::list_releases().map_err(|e| e.to_string())
+pub async fn fetch_releases() -> Result<releases::ReleaseList, String> {
+    // ureq is synchronous; keep the blocking HTTPS fetch off the main thread.
+    tauri::async_runtime::spawn_blocking(releases::list_releases)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
+/// Resolve pnpm against an already-probed node (the caller's cached
+/// `node::NodeInfo`), auto-installing pnpm via npm when missing. Returns
+/// (node_path, pnpm_exe).
 pub fn promise_pnpm(
     data_dir: &Path,
+    node_info: &node::NodeInfo,
     mut on_progress: impl FnMut(&str),
-) -> Result<(PathBuf, PathBuf, node::NodeInfo), String> {
-    let s = settings::load(data_dir);
-    let node_info = node::resolve(&s);
+) -> Result<(PathBuf, PathBuf), String> {
     if !node_info.ok {
-        return Err(node_info.reason);
+        return Err(node_info.reason.clone());
     }
+    let s = settings::load(data_dir);
     let node_dir = Path::new(&node_info.path)
         .parent()
         .map(|p| p.to_path_buf())
@@ -186,7 +189,7 @@ pub fn promise_pnpm(
             .unwrap_or(0)
     ));
     let pnpm = node::ensure_pnpm(&s, &node_dir, &pnpm_log, &mut on_progress)?;
-    Ok((PathBuf::from(node_info.path.clone()), pnpm, node_info))
+    Ok((PathBuf::from(node_info.path.clone()), pnpm))
 }
 
 // --- kernel install / switch / remove --------------------------------------
@@ -199,7 +202,9 @@ pub async fn install_kernel(
     on_event: Channel<String>,
 ) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
-    let (node_path, pnpm_exe, _node_info) = promise_pnpm(&data_dir, |msg| {
+    let settings = settings::load(&data_dir);
+    let node_info = cached_node(&state, &settings);
+    let (node_path, pnpm_exe) = promise_pnpm(&data_dir, &node_info, |msg| {
         let _ = on_event.send(msg.to_string());
     })?;
     // Clone the values the closure needs so we still own `data_dir` and
@@ -240,21 +245,35 @@ pub async fn install_kernel(
 }
 
 #[tauri::command]
-pub fn activate_version(state: State<'_, AppState>, version: String) -> Result<(), String> {
-    let data_dir = state.data_dir.clone();
-    // The switch takes effect on the next start; a running kernel keeps
-    // serving until the user restarts it.
-    kernel::set_active(&data_dir, &version).map_err(|e| e.to_string())?;
-    // 重新接线插件到新活动内核（失败不阻断切换，原因进入插件卡片警告）
-    let settings = settings::load(&data_dir);
-    let _ = plugins::ensure_wiring_quiet(&data_dir, &settings);
-    Ok(())
+pub async fn activate_version(app: AppHandle, version: String) -> Result<(), String> {
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    // Wiring runs pnpm against the store; keep the whole switch off the
+    // main thread.
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // The switch takes effect on the next start; a running kernel keeps
+        // serving until the user restarts it.
+        kernel::set_active(&data_dir, &version).map_err(|e| e.to_string())?;
+        // 重新接线插件到新活动内核（失败不阻断切换，原因进入插件卡片警告）
+        let settings = settings::load(&data_dir);
+        let state = app.state::<AppState>();
+        let node_info = cached_node(&state, &settings);
+        let _ = plugins::ensure_wiring_quiet(&data_dir, &settings, &node_info);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn remove_version(state: State<'_, AppState>, version: String) -> Result<(), String> {
+pub async fn remove_version(state: State<'_, AppState>, version: String) -> Result<(), String> {
     let data_dir = state.data_dir.clone();
-    kernel::uninstall(&data_dir, &version).map_err(|e| app_err(&state, e))
+    // remove_dir_all on a kernel tree (node_modules included) can take
+    // seconds on Windows; never on the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        kernel::uninstall(&data_dir, &version).map_err(|e| app_err(&data_dir, e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // --- kernel lifecycle -------------------------------------------------------
@@ -262,17 +281,30 @@ pub fn remove_version(state: State<'_, AppState>, version: String) -> Result<(),
 /// Start the active kernel. Idempotent: if the port already answers, this is
 /// a no-op so repeated clicks are harmless.
 #[tauri::command]
-pub fn start_kernel(state: State<'_, AppState>) -> Result<u16, String> {
-    let data_dir = state.data_dir.clone();
-    let node_path = resolve_node_path(&data_dir)?;
-    // 启动前校正插件接线（跳过则内核可能不加载插件；失败不阻断启动）
-    let settings = settings::load(&data_dir);
-    let _ = plugins::ensure_wiring_quiet(&data_dir, &settings);
-    if let Some(child) = kernel::start_maybe(&data_dir, &node_path).map_err(|e| e.to_string())? {
-        kernel::write_pid(&data_dir, child.id());
-        crate::lock(&state.running).replace(child);
-    }
-    Ok(settings.port)
+pub async fn start_kernel(app: AppHandle) -> Result<u16, String> {
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    // Wiring and the child spawn both block (pnpm, process creation); run
+    // them on a blocking worker rather than the Tauri main thread.
+    tauri::async_runtime::spawn_blocking(move || -> Result<u16, String> {
+        let settings = settings::load(&data_dir);
+        let state = app.state::<AppState>();
+        let node_info = cached_node(&state, &settings);
+        if !node_info.ok {
+            return Err(node_info.reason.clone());
+        }
+        let node_path = PathBuf::from(node_info.path.clone());
+        // 启动前校正插件接线（跳过则内核可能不加载插件；失败不阻断启动）
+        let _ = plugins::ensure_wiring_quiet(&data_dir, &settings, &node_info);
+        if let Some(child) =
+            kernel::start_maybe(&data_dir, &node_path).map_err(|e| e.to_string())?
+        {
+            kernel::write_pid(&data_dir, child.id());
+            crate::lock(&state.running).replace(child);
+        }
+        Ok(settings.port)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Stop the kernel and close the harness window, so the UI's「关闭工作台」
@@ -280,24 +312,32 @@ pub fn start_kernel(state: State<'_, AppState>) -> Result<u16, String> {
 /// When the shell restarted since it spawned the kernel, the in-memory child
 /// is gone but the pid file still names the process to reap.
 #[tauri::command]
-pub fn stop_kernel(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("harness") {
         let _ = window.close();
     }
-    let mut guard = crate::lock(&state.running);
-    if let Some(mut child) = guard.take() {
-        kernel::stop(&mut child).map_err(|e| e.to_string())?;
-    }
-    drop(guard);
-    let data_dir = state.data_dir.clone();
-    let port = settings::load(&data_dir).port;
-    if kernel::port_open(port) {
-        if let Some(pid) = kernel::read_pid(&data_dir) {
-            kernel::kill_pid(pid);
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    // kernel::stop waits for the child to exit (up to its kill timeout);
+    // keep that wait off the main thread.
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let state = app.state::<AppState>();
+        {
+            let mut guard = crate::lock(&state.running);
+            if let Some(mut child) = guard.take() {
+                kernel::stop(&mut child).map_err(|e| e.to_string())?;
+            }
         }
-    }
-    kernel::clear_pid(&data_dir);
-    Ok(())
+        let port = settings::load(&data_dir).port;
+        if kernel::port_open(port) {
+            if let Some(pid) = kernel::read_pid(&data_dir) {
+                kernel::kill_pid(pid);
+            }
+        }
+        kernel::clear_pid(&data_dir);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Open the harness web UI in a dedicated window.
@@ -342,139 +382,127 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
 
 /// Snapshot of the plugin store and per-kernel materialization state.
 #[tauri::command]
-pub fn plugin_status(state: State<'_, AppState>) -> plugins::PluginStatus {
+pub async fn plugin_status(state: State<'_, AppState>) -> Result<plugins::PluginStatus, String> {
     let data_dir = state.data_dir.clone();
-    let settings = settings::load(&data_dir);
-    plugins::status(&data_dir, &settings)
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = settings::load(&data_dir);
+        plugins::status(&data_dir, &settings)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Shared body of the plugin store commands: resolve pnpm against the
+/// cached node probe (streaming any auto-install progress), then run the
+/// `plugins::` operation on a blocking worker with progress forwarded over
+/// the channel.
+async fn run_plugin_command(
+    app: AppHandle,
+    on_event: Channel<String>,
+    op: impl FnOnce(&Path, &settings::Settings, &Path, &mut dyn FnMut(&str)) -> Result<(), AppError>
+        + Send
+        + 'static,
+) -> Result<(), String> {
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let settings = settings::load(&data_dir);
+        let state = app.state::<AppState>();
+        let node_info = cached_node(&state, &settings);
+        let promise_send = on_event.clone();
+        let (_, pnpm_exe) = promise_pnpm(&data_dir, &node_info, move |msg| {
+            let _ = promise_send.send(msg.to_string());
+        })?;
+        let mut progress = |msg: &str| {
+            let _ = on_event.send(msg.to_string());
+        };
+        op(&data_dir, &settings, &pnpm_exe, &mut progress).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Install a community plugin (npm package name or git URL) into the
 /// central store, materialize it into every kernel, and wire the profile.
 #[tauri::command]
 pub async fn plugin_install(
-    state: State<'_, AppState>,
+    app: AppHandle,
     spec: String,
     mode: String,
     on_event: Channel<String>,
 ) -> Result<(), String> {
-    let data_dir = state.data_dir.clone();
-    let settings = settings::load(&data_dir);
-    let send = on_event.clone();
-    let promise_send = send.clone();
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
-        let _ = promise_send.send(msg.to_string());
-    })?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut progress = |msg: &str| {
-            let _ = send.send(msg.to_string());
-        };
-        plugins::install(&data_dir, &settings, &pnpm_exe, &spec, &mode, &mut progress)
-    })
+    run_plugin_command(
+        app,
+        on_event,
+        move |data_dir, settings, pnpm_exe, progress| {
+            plugins::install(data_dir, settings, pnpm_exe, &spec, &mode, progress).map(|_| ())
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
-    .map(|_| ())
-    .map_err(|e| e.to_string())
 }
 
 /// Fetch the latest version of one installed plugin and re-materialize.
 #[tauri::command]
 pub async fn plugin_update(
-    state: State<'_, AppState>,
+    app: AppHandle,
     id: String,
     on_event: Channel<String>,
 ) -> Result<(), String> {
-    let data_dir = state.data_dir.clone();
-    let settings = settings::load(&data_dir);
-    let send = on_event.clone();
-    let promise_send = send.clone();
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
-        let _ = promise_send.send(msg.to_string());
-    })?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut progress = |msg: &str| {
-            let _ = send.send(msg.to_string());
-        };
-        plugins::update(&data_dir, &settings, &pnpm_exe, &id, &mut progress)
-    })
+    run_plugin_command(
+        app,
+        on_event,
+        move |data_dir, settings, pnpm_exe, progress| {
+            plugins::update(data_dir, settings, pnpm_exe, &id, progress).map(|_| ())
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
-    .map(|_| ())
-    .map_err(|e| e.to_string())
 }
 
 /// Uninstall a plugin everywhere (store, kernels, profile wiring).
 #[tauri::command]
 pub async fn plugin_uninstall(
-    state: State<'_, AppState>,
+    app: AppHandle,
     id: String,
     on_event: Channel<String>,
 ) -> Result<(), String> {
-    let data_dir = state.data_dir.clone();
-    let settings = settings::load(&data_dir);
-    let send = on_event.clone();
-    let promise_send = send.clone();
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
-        let _ = promise_send.send(msg.to_string());
-    })?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut progress = |msg: &str| {
-            let _ = send.send(msg.to_string());
-        };
-        plugins::uninstall(&data_dir, &settings, &pnpm_exe, &id, &mut progress)
-    })
+    run_plugin_command(
+        app,
+        on_event,
+        move |data_dir, settings, pnpm_exe, progress| {
+            plugins::uninstall(data_dir, settings, pnpm_exe, &id, progress)
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
 }
 
 /// Re-materialize everything and re-wire the profile (「同步」button).
 #[tauri::command]
-pub async fn plugin_sync(
-    state: State<'_, AppState>,
-    on_event: Channel<String>,
-) -> Result<(), String> {
-    let data_dir = state.data_dir.clone();
-    let settings = settings::load(&data_dir);
-    let send = on_event.clone();
-    let promise_send = send.clone();
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
-        let _ = promise_send.send(msg.to_string());
-    })?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut progress = |msg: &str| {
-            let _ = send.send(msg.to_string());
-        };
-        plugins::sync_all(&data_dir, &settings, &pnpm_exe, &mut progress)
-    })
+pub async fn plugin_sync(app: AppHandle, on_event: Channel<String>) -> Result<(), String> {
+    run_plugin_command(
+        app,
+        on_event,
+        move |data_dir, settings, pnpm_exe, progress| {
+            plugins::sync_all(data_dir, settings, pnpm_exe, progress)
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
 }
 
 /// Switch a plugin's materialization mode (link/copy) and re-sync.
 #[tauri::command]
 pub async fn plugin_set_mode(
-    state: State<'_, AppState>,
+    app: AppHandle,
     id: String,
     mode: String,
     on_event: Channel<String>,
 ) -> Result<(), String> {
-    let data_dir = state.data_dir.clone();
-    let settings = settings::load(&data_dir);
-    let send = on_event.clone();
-    let promise_send = send.clone();
-    let (_, pnpm_exe, _) = promise_pnpm(&data_dir, move |msg| {
-        let _ = promise_send.send(msg.to_string());
-    })?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut progress = |msg: &str| {
-            let _ = send.send(msg.to_string());
-        };
-        plugins::set_mode(&data_dir, &settings, &pnpm_exe, &id, &mode, &mut progress)
-    })
+    run_plugin_command(
+        app,
+        on_event,
+        move |data_dir, settings, pnpm_exe, progress| {
+            plugins::set_mode(data_dir, settings, pnpm_exe, &id, &mode, progress)
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
 }
 
 /// Check every installed plugin against its origin for newer versions.

@@ -25,6 +25,34 @@ pub const TAG_PREFIX: &str = "dsh-v";
 
 const USER_AGENT: &str = concat!("dsh-desktop/", env!("CARGO_PKG_VERSION"));
 
+/// GET `url` and return the body as text. Every shell fetch goes out with
+/// the desktop User-Agent; `accept` carries an extra Accept header for the
+/// one endpoint that expects it (GitHub's REST API).
+pub(crate) fn http_get_string(url: &str, accept: Option<&str>) -> Result<String, String> {
+    let request = ureq::get(url).header("User-Agent", USER_AGENT);
+    let request = match accept {
+        Some(value) => request.header("Accept", value),
+        None => request,
+    };
+    let mut response = request.call().map_err(|e: ureq::Error| e.to_string())?;
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e: ureq::Error| e.to_string())
+}
+
+/// GET `url` and return the body as bytes (npm tarball downloads).
+pub(crate) fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let mut response = ureq::get(url)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e: ureq::Error| e.to_string())?;
+    response
+        .body_mut()
+        .read_to_vec()
+        .map_err(|e: ureq::Error| e.to_string())
+}
+
 /// npm registry endpoint for the `@deepseek-ai/dsh` package. The npm
 /// registry returns a full JSON document with all published versions,
 /// `dist-tags`, scripts, and metadata; it is what `npm view` reads.
@@ -122,15 +150,7 @@ impl NpmPackageDoc {
 /// Fetch the kernel version list from the npm registry.
 fn fetch_npm() -> Result<Vec<ReleaseInfo>, String> {
     let url = npm_registry_url();
-    let response = ureq::get(&url)
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e: ureq::Error| e.to_string())?;
-    let mut response = response;
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e: ureq::Error| e.to_string())?;
+    let body = http_get_string(&url, None)?;
     let pkg: NpmPackageDoc =
         serde_json::from_str(&body).map_err(|e: serde_json::Error| e.to_string())?;
 
@@ -180,16 +200,7 @@ struct GhRelease {
 
 /// Pull the `dsh-v*` release tags from the GitHub API (fallback).
 fn fetch_api() -> Result<Vec<ReleaseInfo>, String> {
-    let response = ureq::get(GITHUB_API_URL)
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e: ureq::Error| e.to_string())?;
-    let mut response = response;
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e: ureq::Error| e.to_string())?;
+    let body = http_get_string(GITHUB_API_URL, Some("application/vnd.github+json"))?;
     let releases: Vec<GhRelease> =
         serde_json::from_str(&body).map_err(|e: serde_json::Error| e.to_string())?;
     let mut out: Vec<ReleaseInfo> = releases
@@ -240,15 +251,7 @@ fn parse_atom(xml: &str) -> Vec<ReleaseInfo> {
 
 /// Pull the `dsh-v*` release tags from the Atom feed (fallback).
 fn fetch_atom() -> Result<Vec<ReleaseInfo>, String> {
-    let response = ureq::get(GITHUB_ATOM_URL)
-        .header("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e: ureq::Error| e.to_string())?;
-    let mut response = response;
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e: ureq::Error| e.to_string())?;
+    let body = http_get_string(GITHUB_ATOM_URL, None)?;
     let out = parse_atom(&body);
     if out.is_empty() {
         return Err("Atom feed 未解析到 dsh-v* 标签".into());
