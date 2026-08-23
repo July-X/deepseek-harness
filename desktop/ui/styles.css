@@ -980,8 +980,16 @@ button.danger.armed {
 }
 
 .plugin-row {
-  align-items: flex-start;
-  flex-wrap: wrap;
+  /* At 480px the info column (name + meta) and the five action
+     buttons overflow the row. Drop to flex-column so the info
+     reads on the first line and the action row takes the second
+     line full-width. The earlier flex-wrap: wrap + flex: 1
+     on .plugin-info produced the screenshot's two-line name
+     with a partially-clipped action row on the right. */
+  align-items: stretch;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 4px;
 }
 
 .plugin-info {
@@ -989,7 +997,7 @@ button.danger.armed {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  flex: 1;
+  flex: 0 0 auto;
 }
 
 .plugin-row .release-ver {
@@ -999,11 +1007,20 @@ button.danger.armed {
 .plugin-meta {
   color: var(--muted);
   font-size: 12px;
+  word-break: break-all;
 }
 
 .plugin-actions {
+  /* The action row spans the full plugin-row width now. With
+     flex-wrap: wrap on the actions themselves the five badges +
+     buttons (链接 / 已同步 / 切换为复制 / 仓库 / 卸载) line up
+     along the second line of the row; they reflow to a second
+     wrap only when the column is too narrow. justify-content:
+     flex-end keeps the right-most button (卸载) flush with the
+     card's right edge. */
   flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 6px;
 }
 
 .badge.update {
