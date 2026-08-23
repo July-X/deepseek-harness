@@ -137,11 +137,22 @@ pub async fn install(
     let progress = std::sync::Mutex::new(on_progress);
     update
         .download_and_install(
-            |_received, total| {
-                let total = total
+            |received, total| {
+                // tauri-plugin-updater's chunk callback fires per chunk with
+                // the running byte total in `received` and an Option<usize>
+                // for the response Content-Length in `total`. The previous
+                // implementation only surfaced `total`, which made the
+                // banner read as a frozen \"(4.0 MB)\" even though the
+                // download was progressing — users reported the update as
+                // stuck. Surface both: received / total in MB so the
+                // banner visibly advances on each chunk.
+                let received_mb = format!("{:.1} MB", received as f64 / 1_048_576.0);
+                let total_mb = total
                     .map(|t| format!("{:.1} MB", t as f64 / 1_048_576.0))
                     .unwrap_or_else(|| "?".into());
-                crate::lock(&progress)(&format!("正在下载 v{version}（{total}）…"));
+                crate::lock(&progress)(&format!(
+                    "正在下载 v{version}（{received_mb} / {total_mb}）…"
+                ));
             },
             || crate::lock(&progress)("下载完成，正在安装并重启…"),
         )
