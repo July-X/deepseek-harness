@@ -2,15 +2,19 @@
 //!
 //! Settings live in `<data_dir>/settings.json` as a flat JSON struct so the
 //! UI can read and update them through ordinary command round-trips
-//! (`<data_dir>` is `<dsh_home>/desktop/`, see [`crate::kernel::data_dir`]).
+//! (`<data_dir>` is `<dsh_home>/desktop[-dev]/`, see [`crate::kernel::data_dir`]).
 
 use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// The port the management UI expects the dsh web server on.
-pub const DEFAULT_PORT: u16 = 3080;
+/// The port the management UI expects the dsh web server on when the
+/// user has not yet persisted a value of their own. Re-exports
+/// [`crate::kernel::DEFAULT_PORT`] so the two definitions cannot drift —
+/// debug builds (3091) and release builds (3090) agree on the same
+/// fallback.
+pub use crate::kernel::DEFAULT_PORT as DEFAULT_PORT;
 
 /// User-facing configuration the desktop shell needs to run a kernel.
 #[derive(Debug, Clone, Serialize, Deserialize)]

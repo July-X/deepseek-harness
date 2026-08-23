@@ -35,6 +35,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let data_dir = kernel::data_dir(app.handle());
+            // Stamp the resolved data dir on stderr so a developer running
+            // `tauri dev` alongside the installed release shell can see at
+            // a glance which of the two (release → `~/.dsh/desktop/`, debug
+            // → `~/.dsh/desktop-dev/`) actually owns this process. Cheap
+            // insurance against the classic "I edited settings in the dev
+            // shell and the release shell doesn't see it" foot-gun.
+            eprintln!(
+                "dsh-desktop: data_dir = {} (build: {})",
+                data_dir.display(),
+                if cfg!(debug_assertions) { "dev" } else { "release" }
+            );
             app.manage(AppState {
                 data_dir,
                 running: Mutex::new(None),

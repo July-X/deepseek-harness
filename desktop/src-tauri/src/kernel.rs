@@ -37,8 +37,29 @@ use crate::settings::{self, Settings};
 
 /// dsh's own home directory name (see `@deepseek-ai/dsh-home-paths`).
 pub const DSH_HOME_DIR_NAME: &str = ".dsh";
-/// Shell metadata root under the dsh home: `<dsh_home>/desktop/`.
-const SHELL_SUBDIR: &str = "desktop";
+/// Shell metadata root under the dsh home for a *release* build of the
+/// shell: `<dsh_home>/desktop/`.
+const SHELL_SUBDIR_RELEASE: &str = "desktop";
+/// Shell metadata root for a *debug* build (`tauri dev`). The path sits
+/// next to the release path but is named differently so a developer can
+/// run `tauri dev` and the installed release shell side-by-side without
+/// either one stomping on the other's settings.json / kernels / active.txt
+/// / kernel.pid / port. Both builds read their own data dir, so the dev
+/// shell sees its own set of installed kernels and its own running kernel
+/// pid, and the release shell sees its own.
+const SHELL_SUBDIR_DEV: &str = "desktop-dev";
+/// Sub-directory actually used by this build, picked at compile time.
+const SHELL_SUBDIR: &str = if cfg!(debug_assertions) {
+    SHELL_SUBDIR_DEV
+} else {
+    SHELL_SUBDIR_RELEASE
+};
+/// Default port for the kernel web server. Debug builds default to 3091
+/// (one above the release 3090) so `tauri dev` and the installed release
+/// shell can run on the same machine without colliding on loopback. The
+/// value only matters when settings.json is missing or has no `port`
+/// field; once the user persists a value it is read back as-is.
+pub const DEFAULT_PORT: u16 = if cfg!(debug_assertions) { 3091 } else { 3090 };
 /// Relative path of the kernel's CLI entry inside an installed package.
 const KERNEL_BIN_REL: &str = "node_modules/@deepseek-ai/dsh/lib/bin.js";
 
@@ -68,11 +89,27 @@ pub struct KernelStatus {
     pub ever_installed: bool,
 }
 
-/// Shell metadata root: `<dsh_home>/desktop/`, where `<dsh_home>` is the
-/// harness home (`~/.dsh` by default, overridable via `DSH_HOME`, mirroring
-/// `@deepseek-ai/dsh-home-paths`). All shell state (kernels, settings, logs,
-/// active pointer) lives under this one root next to the kernel's own data.
+/// Shell metadata root, derived in this priority order:
+///
+/// 1. `DSH_DESKTOP_DATA_DIR` — full override. Lets a power user point the
+///    shell at any directory (e.g. for testing on an external drive) and
+///    short-circuits both the dsh-home and build-type subdir logic below.
+/// 2. `<dsh_home>/<SHELL_SUBDIR>/` where `<dsh_home>` comes from `DSH_HOME`
+///    or `~/.dsh` and `<SHELL_SUBDIR>` is `desktop/` for release builds
+///    and `desktop-dev/` for debug builds (`tauri dev`). The two names keep
+///    a developer-run shell and the installed release shell from sharing
+///    settings.json / active.txt / kernel.pid / port when both run on the
+///    same machine.
+/// 3. Tauri's OS app-data dir as a last-resort fallback if the dsh home is
+///    read-only; better to boot somewhere than to fail at startup.
+///
+/// All shell state (kernels, settings, logs, active pointer) lives under
+/// this one root next to the kernel's own data.
 pub fn data_dir(app: &tauri::AppHandle) -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("DSH_DESKTOP_DATA_DIR").map(PathBuf::from) {
+        let _ = fs::create_dir_all(&override_dir);
+        return override_dir;
+    }
     let home = std::env::var_os("DSH_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_home().join(DSH_HOME_DIR_NAME));

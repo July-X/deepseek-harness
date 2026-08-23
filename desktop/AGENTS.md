@@ -47,7 +47,24 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
 
 ## 数据目录
 
-外壳全部状态位于 `<dsh_home>/desktop/`（默认 `~/.dsh/desktop/`，`DSH_HOME` 可重定向），由 `kernel::data_dir` 统一解析并在启动时创建；`lib.rs` 的 `setup()` 必须通过它取目录——不要绕回 `app_data_dir()`。子结构：`kernels/<版本>/`、`logs/`、`settings.json`、`active.txt`。
+外壳全部状态位于 `<dsh_home>/desktop/`（release build）或 `<dsh_home>/desktop-dev/`（debug build `tauri dev`），由 `kernel::data_dir` 统一解析并在启动时创建；`lib.rs` 的 `setup()` 必须通过它取目录——不要绕回 `app_data_dir()`。子结构：`kernels/<版本>/`、`logs/`、`settings.json`、`active.txt`、`kernel.pid`。
+
+**为什么 dev 和 release 用不同目录**——`settings.json`（端口配置）、`active.txt`（当前激活版本）、`kernel.pid`（运行中内核的 PID）、`kernels/<版本>/`（安装的内核）、loopback 端口都是**共享资源**。一个开发者同时跑 `tauri dev` 和已装的 release shell 时，两个实例会互相争端口（`port_open` 拒绝启动）、互相 kill（任意一方点"关闭工作台"就把对方的内核杀了）、互相覆盖 `active.txt` 和 `settings.json`。分目录 + 错位端口（debug 3091 / release 3090）让两边完全互不读对方的 state——dev 可以放心改端口、切内核、看 log，不会污染 release shell 的视图。
+
+启动时 `setup()` 会在 stderr 打印 `dsh-desktop: data_dir = <path> (build: dev|release)`，让用户一眼确认当前进程用的是哪个目录。
+
+**优先级**（`kernel::data_dir` 解析顺序）：
+
+1. `DSH_DESKTOP_DATA_DIR` 环境变量——完全覆盖目录路径（用于在外部盘上测试等场景）
+2. `<DSH_HOME 或 ~/.dsh>/<SHELL_SUBDIR>/`——`SHELL_SUBDIR` 在 release 是 `desktop`、debug 是 `desktop-dev`
+3. `app_data_dir()`（OS app-data 目录）作为只读 dsh home 的 fallback
+
+**端口**（`kernel::DEFAULT_PORT`）：
+
+- debug build：3091（release 默认 3090 + 1）
+- release build：3090
+
+`Settings::default()` 的 port 在 settings.json 缺失时用 `kernel::DEFAULT_PORT`；用户保存过的 port 优先。
 
 ## 插件机制
 
