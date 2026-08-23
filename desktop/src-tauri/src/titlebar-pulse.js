@@ -14,9 +14,10 @@
  * The workbench intentionally diverges from the desktop shell panel on
  * two axes:
  *
- * - colour: an emerald-400 sweep instead of the whale-eye red, so the
- *   user can read at a glance which surface the chrome belongs to
- *   (workbench = green; management panel = red whale eye).
+ * - colour: the Gitea brand green (#609926, rgb 96,152,38) — pure green,
+ *   warmer than Tailwind's emerald-400 — so the user can read at a
+ *   glance which surface the chrome belongs to (workbench = Gitea
+ *   green; management panel = red whale eye).
  * - tempo: 6.912s period — 10% faster than the shell panel's 7.68s —
  *   so the workbench pulse reads as a slightly more alert presence.
  *
@@ -41,11 +42,11 @@
     "  width: 38% !important;",
     "  z-index: 1000 !important;",
     "  pointer-events: none !important;",
-    "  background: linear-gradient(90deg, transparent 0%, rgba(110, 231, 183, 0.55) 30%, #34d399 50%, rgba(110, 231, 183, 0.55) 70%, transparent 100%) !important;",
+    "  background: linear-gradient(90deg, transparent 0%, rgba(96, 152, 38, 0.55) 30%, #609926 50%, rgba(96, 152, 38, 0.55) 70%, transparent 100%) !important;",
     "  filter: blur(0.4px) !important;",
     "  border-radius: 999px !important;",
     "  animation: dsh-workbench-titlebar-pulse-sweep 6.912s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;",
-    "  box-shadow: 0 0 8px rgba(52, 211, 153, 0.45) !important;",
+    "  box-shadow: 0 0 8px rgba(96, 152, 38, 0.45) !important;",
     "}",
     /* Second sweep — same width, half-cycle offset so the eye reads a
        continuous scan rather than a single dash crossing then dead
@@ -59,12 +60,12 @@
     "  width: 38% !important;",
     "  z-index: 1000 !important;",
     "  pointer-events: none !important;",
-    "  background: linear-gradient(90deg, transparent 0%, rgba(110, 231, 183, 0.55) 30%, #34d399 50%, rgba(110, 231, 183, 0.55) 70%, transparent 100%) !important;",
+    "  background: linear-gradient(90deg, transparent 0%, rgba(96, 152, 38, 0.55) 30%, #609926 50%, rgba(96, 152, 38, 0.55) 70%, transparent 100%) !important;",
     "  filter: blur(0.4px) !important;",
     "  border-radius: 999px !important;",
     "  animation: dsh-workbench-titlebar-pulse-sweep 6.912s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;",
     "  animation-delay: 3.456s !important;",
-    "  box-shadow: 0 0 8px rgba(52, 211, 153, 0.45) !important;",
+    "  box-shadow: 0 0 8px rgba(96, 152, 38, 0.45) !important;",
     "}",
     "@keyframes dsh-workbench-titlebar-pulse-sweep {",
     "  0% { transform: translateX(-120%); opacity: 0; }",
