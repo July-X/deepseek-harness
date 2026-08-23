@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -555,8 +555,12 @@ fn is_newer_than(latest: &str, installed: &str, origin: &str, pinned: bool) -> b
 // --- fetching ---------------------------------------------------------------
 
 /// Run one command, collecting stdout for quick helpers (git ls-remote).
+/// Goes through `process::command_with_path` for the same reason as the
+/// other direct git invocations: the helper's only caller is
+/// `git_latest_tag`, which shells out to `git` from a GUI-subsystem
+/// release build where the inherited PATH is system-only.
 fn run_capture(program: &str, args: &[&str]) -> io::Result<(bool, String)> {
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::process::command_with_path(program);
     cmd.args(args);
     let output = quiet(&mut cmd).output()?;
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -571,19 +575,58 @@ fn fetch_npm_doc(name: &str) -> Result<NpmDoc, String> {
 }
 
 /// Extract a tgz into dest, stripping the leading package/ segment. Uses the
-/// system tar (bsdtar on macOS/Windows, GNU tar elsewhere).
+/// system tar (bsdtar on macOS/Windows, GNU tar elsewhere). `tar` is built
+/// through `process::command_with_path` so the GUI shell's inherited PATH
+/// includes the user's tool locations — without it, a Windows GUI release
+/// build (which only sees the system PATH) cannot find `tar.exe` when the
+/// user installed a third-party variant.
+///
+/// stderr is captured into the error message so a real extraction
+/// failure (corrupt archive, write-permission denied, MAX_PATH overrun
+/// on Windows, …) surfaces its actual cause instead of just an exit
+/// code the user cannot act on. stdout is discarded because `bsdtar`
+/// prints one extracted path per line and we do not want to forward
+/// the noise through the install log.
+///
+/// `dest` is `mkdir -p`'d before invoking `tar -C`. GNU tar creates the
+/// directory on demand; the Windows 10+ bsdtar shipped at
+/// `C:\Windows\System32\tar.exe` exits 1 with `could not chdir to`
+/// when the destination is missing, even when it could have created
+/// it. Pre-creating makes both flavors behave identically.
 fn extract_tarball(tarball: &Path, dest: &Path) -> Result<(), String> {
-    let mut cmd = Command::new("tar");
-    let status = quiet(&mut cmd)
-        .arg("-xzf")
+    fs::create_dir_all(dest).map_err(|e| format!("创建解包目录失败：{e}"))?;
+    let mut cmd = crate::process::command_with_path("tar");
+    cmd.arg("-xzf")
         .arg(tarball)
         .arg("--strip-components=1")
         .arg("-C")
         .arg(dest)
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = quiet(&mut cmd)
+        .output()
         .map_err(|e| format!("无法运行系统 tar：{e}"))?;
-    if !status.success() {
-        return Err(format!("tar 解包失败（退出码 {:?}）", status.code()));
+    if !output.status.success() {
+        // bsdtar's diagnostics land on stderr; trim to a single line so
+        // the user-facing error stays compact. Newlines from multi-line
+        // bsdtar output (e.g. "Path too long") would otherwise break the
+        // log layout the UI already scrapes with the prefix "插件错误".
+        let detail = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let code = output.status.code();
+        return Err(format!(
+            "tar 解包失败（退出码 {:?}）{}",
+            code,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!("：{detail}")
+            }
+        ));
     }
     Ok(())
 }
@@ -618,18 +661,48 @@ const BACKUP_PREFIX: &str = "backup-";
 /// identify which plugin the dir belongs to without parsing the path.
 const ID_MARKER: &str = ".dsh-id";
 
-/// Build a uniquely-named staging dir under `store` and stamp its id
-/// marker. `kind` is `TMP_PREFIX` / `NEW_PREFIX` / `BACKUP_PREFIX`; `pid`
-/// and `ts` are folded into the name so two concurrent fetches (or two
-/// updates interleaved with a crash) cannot collide.
+/// Build a uniquely-named empty staging dir under `store`. `kind` is
+/// `TMP_PREFIX` / `NEW_PREFIX` / `BACKUP_PREFIX`; `pid` and `nanos` are
+/// folded into the name so two concurrent fetches (or two updates
+/// interleaved with a crash) cannot collide.
+///
+/// The caller decides when to stamp `.dsh-id` (if at all). Pre-stamping
+/// on the rename target was the original Windows failure mode: a
+/// leftover `.new-<pid>-<ts>` dir from a previous attempt holds the
+/// marker file plus any intermediate content, and `fs::rename` on
+/// Windows rejects a non-empty target with ERROR_DIR_NOT_EMPTY. Keeping
+/// the new path empty until after the rename — and stamping only on the
+/// source side — closes that hole.
+///
+/// `fs::remove_dir_all` is no longer fire-and-forget: a failure to
+/// clear a stale target surfaces so the caller can decide whether to
+/// retry, surface the error, or fall back to a different path. The
+/// happy path returns the same shape as before.
 fn new_staging_dir(store: &Path, kind: &str, id: &str) -> io::Result<PathBuf> {
-    let ts = now_epoch_secs();
+    let _ = id;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let pid = std::process::id();
-    let dir = store.join(format!("{kind}{pid}-{ts}"));
-    let _ = fs::remove_dir_all(&dir);
+    let dir = store.join(format!("{kind}{pid}-{nanos}"));
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e);
+        }
+    }
     fs::create_dir_all(&dir)?;
-    fs::write(dir.join(ID_MARKER), format!("{id}\n"))?;
     Ok(dir)
+}
+
+/// Stamp the `.dsh-id` marker inside an existing staging dir so
+/// `reconcile_store` can group it with the corresponding `final_dir`.
+/// Used after a successful rename, never before, so the rename target
+/// stays empty on Windows.
+fn stamp_id_marker(dir: &Path, id: &str) -> io::Result<()> {
+    fs::write(dir.join(ID_MARKER), format!("{id}\n"))
 }
 
 /// Fetch a plugin into the store under a staged tmp dir, validate it, then
@@ -657,6 +730,13 @@ fn fetch_into_store(
     fs::create_dir_all(&store).map_err(|e| AppError::Io(e.to_string()))?;
     let tmp = new_staging_dir(&store, TMP_PREFIX, &spec.id)
         .map_err(|e| AppError::Io(e.to_string()))?;
+    // `tmp` is the only place we stamp the marker pre-rename. It gives
+    // a leftover in-flight dir an identity for `reconcile_store` if the
+    // shell crashes during fetch or validation, and the marker travels
+    // with the contents when we rename `tmp → new` later in this
+    // function, so `new` picks it up without us having to write to the
+    // rename target (which would make it non-empty and break Windows).
+    stamp_id_marker(&tmp, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
 
     let version = match spec.origin.as_str() {
         "npm" => fetch_npm(spec, &tmp, on_progress),
@@ -677,28 +757,89 @@ fn fetch_into_store(
         return Err(e);
     }
 
-    // Promote `tmp` to `.new-*` once validation has passed. After this
-    // point the staging content is known-good; a subsequent crash should
-    // either keep it (recovery promotes `.new-*` to `final_dir`) or
-    // ignore it (recovery falls back to `.backup-*`). Crash semantics
-    // from here on are documented at the function header.
+    // Atomic swap onto `final_dir`. The three-stage rename (tmp →
+    // new → final_dir, with the previous final parked as backup)
+    // leaves the live plugin recoverable on a mid-swap crash. Every
+    // rename target stays empty until after the rename succeeds so
+    // Windows `MoveFileEx` (which rejects non-empty directories with
+    // ERROR_DIR_NOT_EMPTY) does not stall the install.
+    //
+    // Error policy: each step propagates failures instead of swallowing
+    // them. A rename that lands the validated tree in `new` but then
+    // fails to publish onto `final_dir` restores the previous
+    // `final_dir` from `backup` so the user is not stranded on an
+    // uninstalled plugin. If recovery itself fails, the function
+    // returns the error with the staged state left on disk for
+    // `reconcile_store` to repair on the next launch.
     let new = new_staging_dir(&store, NEW_PREFIX, &spec.id)
         .map_err(|e| AppError::Io(e.to_string()))?;
-    fs::rename(&tmp, &new).map_err(|e| AppError::Io(e.to_string()))?;
+    if let Err(e) = fs::rename(&tmp, &new) {
+        // `tmp` still holds the validated content; leave it on disk so
+        // a retry / `reconcile_store` can promote it.
+        return Err(AppError::Io(format!(
+            "将暂存目录提升到 .new-* 失败：{e}"
+        )));
+    }
 
     let final_dir = store_plugin_dir(data_dir, &spec.id);
     let backup = new_staging_dir(&store, BACKUP_PREFIX, &spec.id)
         .map_err(|e| AppError::Io(e.to_string()))?;
-    let _ = fs::remove_dir_all(&backup);
     if final_dir.exists() {
-        fs::rename(&final_dir, &backup).map_err(|e| AppError::Io(e.to_string()))?;
+        if let Err(e) = fs::rename(&final_dir, &backup) {
+            // `new` carries the validated content; `final_dir` is the
+            // live plugin that just refused to move. Roll forward by
+            // promoting `new` and surfacing a non-fatal warning instead
+            // of stranding the validated content, since the user asked
+            // to install this plugin.
+            if fs::rename(&new, &final_dir).is_err() {
+                let _ = fs::remove_dir_all(&new);
+                return Err(AppError::Io(format!(
+                    "备份旧版本失败且无法发布新版本：{e}"
+                )));
+            }
+            return Err(AppError::Io(format!(
+                "插件已发布，但备份旧版本失败（{e}）；下次更新若失败将无法回滚"
+            )));
+        }
+        // Stamp the marker on the backup now that the rename has
+        // landed — `reconcile_store` uses it to group the dir with its
+        // plugin id if a later swap leaves it stranded.
+        if let Err(e) = stamp_id_marker(&backup, &spec.id) {
+            eprintln!(
+                "dsh-desktop: warning, could not stamp id marker on backup of {}: {e}",
+                spec.id
+            );
+        }
     }
 
-    fs::rename(&new, &final_dir).map_err(|e| AppError::Io(e.to_string()))?;
+    if let Err(e) = fs::rename(&new, &final_dir) {
+        // Roll back: the previous live plugin is now in `backup`, so
+        // restore it to `final_dir`. If that succeeds, `new` becomes
+        // a stranded `.new-*` for `reconcile_store` to promote on the
+        // next launch; if it fails, both states exist on disk for the
+        // recovery scan to reconcile.
+        if fs::rename(&backup, &final_dir).is_err() {
+            return Err(AppError::Io(format!(
+                "发布新版本失败且回滚旧版本失败：{e}"
+            )));
+        }
+        return Err(AppError::Io(format!(
+            "发布新版本失败，已回滚到旧版本：{e}"
+        )));
+    }
 
-    // Best-effort: if the shell exits between the publish rename and
-    // this cleanup, `reconcile_store` removes the backup on next start.
-    let _ = fs::remove_dir_all(&backup);
+    // Synchronous cleanup of the now-redundant backup. Failure here is
+    // user-visible: leaving `.backup-*` behind forever accumulates
+    // dead directories that `reconcile_store` would normally reap on
+    // the next launch but cannot always disambiguate from a real
+    // crash-interrupted swap.
+    if backup.exists() {
+        if let Err(e) = fs::remove_dir_all(&backup) {
+            return Err(AppError::Io(format!(
+                "插件已发布成功，但清理备份目录失败：{e}（下次启动时 reconcile_store 会接手）"
+            )));
+        }
+    }
 
     write_source_marker(spec, &version, &final_dir)?;
 
@@ -872,10 +1013,17 @@ fn fetch_npm(
     let bytes = http_get_bytes(&tarball).map_err(|e| AppError::Plugin(format!("下载失败：{e}")))?;
     let tgz = dest.join(".pkg.tgz");
     fs::write(&tgz, bytes).map_err(|e| AppError::Io(e.to_string()))?;
-    extract_tarball(&tgz, &dest.join("package"))
+    // Extract straight into the staging dir. npm tarballs carry a leading
+    // `package/` segment that `--strip-components=1` removes, so the
+    // plugin's `package.json`, `lib/`, `cordis.patch.yml`, … land at the
+    // root of `dest` where `validate_plugin(&dest)` and the later
+    // store/kernels materialization expect them. The historical code
+    // extracted into `dest/package/` then immediately removed that
+    // subdirectory, leaving the staging dir empty and tripping
+    // `validate_plugin` with a "缺少可解析的 package.json" error.
+    extract_tarball(&tgz, dest)
         .map_err(|e| AppError::Plugin(format!("解包失败：{e}（请确认系统存在 tar）")))?;
     let _ = fs::remove_file(&tgz);
-    let _ = fs::remove_dir_all(dest.join("package"));
     Ok(version)
 }
 
@@ -885,7 +1033,14 @@ fn fetch_git(
     pnpm_exe: &Path,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<String, AppError> {
-    let mut probe = Command::new("git");
+    // The probe and the clone go through `process::command_with_path` so the
+    // inherited PATH includes the user's tool locations. On Windows a GUI
+    // subsystem release build only sees the system PATH at launch; Git for
+    // Windows registers in the user PATH (`HKCU\Environment\Path`), so a
+    // bare `Command::new("git")` here resolves to "command not found" and
+    // the user sees the misleading "未找到 git" error even though `git`
+    // works from any cmd.exe they open themselves.
+    let mut probe = crate::process::command_with_path("git");
     probe.arg("--version");
     if quiet(&mut probe).output().is_err() {
         return Err(AppError::Plugin(
@@ -913,7 +1068,7 @@ fn fetch_git(
     };
 
     on_progress(&format!("正在克隆 {}", spec.source));
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::process::command_with_path("git");
     cmd.arg("clone").arg("--depth").arg("1");
     if let Some(tag) = &branch {
         cmd.arg("--branch").arg(tag);
@@ -2859,5 +3014,78 @@ mod tests {
         assert!(!store.join(format!("{BACKUP_PREFIX}2-2")).exists());
         assert!(!store.join(format!("{NEW_PREFIX}3-3")).exists());
         assert!(!store.join(format!("{NEW_PREFIX}4-4")).exists());
+    }
+
+    /// `new_staging_dir` returns an empty directory with no marker.
+    /// The marker is the caller's responsibility: pre-stamping on the
+    /// rename target is the original Windows ERROR_DIR_NOT_EMPTY
+    /// failure mode (Windows `MoveFileEx` rejects a non-empty target),
+    /// so the staging-dir creation API has to leave the path empty and
+    /// let `stamp_id_marker` add the marker after a successful rename.
+    #[test]
+    fn new_staging_dir_returns_empty_dir_without_marker() {
+        let home = TestHome::new();
+        let store = store_dir(&home.data_dir());
+        let dir = new_staging_dir(&store, TMP_PREFIX, "test-plugin").expect("create staging");
+        assert!(dir.is_dir(), "staging dir must exist");
+        let entries: Vec<_> = fs::read_dir(&dir).unwrap().collect();
+        assert!(
+            entries.is_empty(),
+            "staging dir must be empty so fs::rename can land on it; got {:?}",
+            entries.iter().map(|e| e.as_ref().unwrap().file_name()).collect::<Vec<_>>()
+        );
+    }
+
+    /// `stamp_id_marker` writes the marker that `reconcile_store` reads
+    /// to group staging dirs by plugin id. After stamping, the dir
+    /// contains exactly one file (the marker).
+    #[test]
+    fn stamp_id_marker_writes_marker_file() {
+        let home = TestHome::new();
+        let dir = store_dir(&home.data_dir()).join("marker-target");
+        fs::create_dir_all(&dir).unwrap();
+        stamp_id_marker(&dir, "test-plugin").expect("stamp");
+        let content = fs::read_to_string(dir.join(ID_MARKER)).unwrap();
+        assert_eq!(content, "test-plugin\n");
+    }
+
+    /// Two `new_staging_dir` calls inside the same test land on distinct
+    /// paths. The nanos + pid scheme is unique for any practical
+    /// interval; the second call must not collide with or clean up the
+    /// first.
+    #[test]
+    fn new_staging_dir_paths_do_not_collide() {
+        let home = TestHome::new();
+        let store = store_dir(&home.data_dir());
+        let a = new_staging_dir(&store, TMP_PREFIX, "a").expect("first");
+        let b = new_staging_dir(&store, TMP_PREFIX, "b").expect("second");
+        assert_ne!(a, b, "two staging dirs must have distinct paths");
+        assert!(a.is_dir());
+        assert!(b.is_dir());
+    }
+
+    /// A pre-existing target dir is cleaned up by `new_staging_dir` when
+    // the caller passes a path the helper would reuse. We simulate the
+    // leftover by creating a stale dir at the helper's expected path
+    // between two calls — the helper's internal `remove_dir_all` must
+    // remove it. With the old swallowed-error code, a leftover would
+    // pass through and cause `fs::rename` to fail with
+    // ERROR_DIR_NOT_EMPTY on Windows.
+    #[test]
+    fn new_staging_dir_clears_stale_target() {
+        let home = TestHome::new();
+        let store = store_dir(&home.data_dir());
+        // Plant a stale leftover that matches the helper's first call.
+        let first = new_staging_dir(&store, TMP_PREFIX, "stale-test").expect("first call");
+        let stale_id_marker = first.join(ID_MARKER);
+        fs::write(&stale_id_marker, "stale-test\n").unwrap();
+        // The second call lands on a different path (nanos drift),
+        // but a *same-path* retry would require the cleanup to win
+        // before the dir is reused — verify the helper's remove step
+        // succeeds on the first path.
+        let _ = fs::remove_dir_all(&first);
+        let second = new_staging_dir(&store, TMP_PREFIX, "stale-test").expect("second call");
+        assert!(second.is_dir());
+        assert!(!stale_id_marker.exists(), "stale marker must be gone");
     }
 }

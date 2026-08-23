@@ -7,6 +7,7 @@
 //! the user sees as a flashing terminal. All helper-process spawns in this
 //! crate go through `quiet`.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
@@ -23,6 +24,31 @@ pub fn quiet(cmd: &mut Command) -> &mut Command {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    cmd
+}
+
+/// Build a `Command` for a one-shot external tool (`git`, `tar`, …) that
+/// inherits the merged PATH, so children of the GUI shell can resolve
+/// tools the user installed under their own user PATH. `process::spawn`
+/// covers long-running helpers (pnpm/npm) and threads the same PATH in;
+/// this helper is the single-shot sibling — every direct `Command::new`
+/// in the shell that does not already live in `process::spawn` should
+/// build through here so a Windows install from `tauri build`'s GUI
+/// subsystem sees the same toolchain the user can see from `cmd.exe`.
+///
+/// Without the merge, `Command::new("git")` from a Windows GUI subsystem
+/// process looks up `git.exe` only on the system PATH. Git for Windows
+/// and most Windows installers register in `HKCU\Environment\Path`
+/// (user PATH), not the system PATH, so the lookup misses and the user
+/// sees the error wrapped as `未找到 git（git 来源的插件需要 git；请先
+/// 安装 git）`. The same shape would affect any other user-PATH-only
+/// tool — `tar` ships at `C:\Windows\System32\tar.exe` and works
+/// without the merge on Windows 10+, but the explicit stamping keeps
+/// macOS/Linux consistent and removes a future surprise when a new tool
+/// stops being system-installed.
+pub fn command_with_path<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.env("PATH", crate::env::merged_path());
     cmd
 }
 
@@ -200,24 +226,36 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Separator the helper actually uses on the host platform.
+    /// `merge_extra_path` follows `cfg(windows)` (see its body), so the
+    /// expected strings here track that choice instead of hard-coding a
+    /// Unix-style `:` that would fail on a Windows test runner.
+    const SEP: char = if cfg!(windows) { ';' } else { ':' };
+
     #[test]
     fn merge_extra_path_no_extras_returns_base() {
-        assert_eq!(merge_extra_path("/usr/bin:/bin", &[]), "/usr/bin:/bin");
+        let base = format!("/usr/bin{SEP}/bin");
+        assert_eq!(merge_extra_path(&base, &[]), base);
     }
 
     #[test]
     fn merge_extra_path_prepends_single_dir() {
         let dir = PathBuf::from("/usr/local/bin");
-        let merged = merge_extra_path("/usr/bin:/bin", &[dir.as_path()]);
-        assert_eq!(merged, "/usr/local/bin:/usr/bin:/bin");
+        let merged =
+            merge_extra_path(&format!("/usr/bin{SEP}/bin"), &[dir.as_path()]);
+        assert_eq!(merged, format!("/usr/local/bin{SEP}/usr/bin{SEP}/bin"));
     }
 
     #[test]
     fn merge_extra_path_preserves_order() {
         let first = PathBuf::from("/opt/homebrew/bin");
         let second = PathBuf::from("/usr/local/bin");
-        let merged = merge_extra_path("/usr/bin", &[first.as_path(), second.as_path()]);
-        assert_eq!(merged, "/opt/homebrew/bin:/usr/local/bin:/usr/bin");
+        let merged =
+            merge_extra_path("/usr/bin", &[first.as_path(), second.as_path()]);
+        assert_eq!(
+            merged,
+            format!("/opt/homebrew/bin{SEP}/usr/local/bin{SEP}/usr/bin")
+        );
     }
 
     #[test]
@@ -225,9 +263,11 @@ mod tests {
         let empty = PathBuf::from("");
         let blank = PathBuf::from("   ");
         let real = PathBuf::from("/usr/local/bin");
-        let merged =
-            merge_extra_path("/usr/bin", &[empty.as_path(), blank.as_path(), real.as_path()]);
-        assert_eq!(merged, "/usr/local/bin:/usr/bin");
+        let merged = merge_extra_path(
+            "/usr/bin",
+            &[empty.as_path(), blank.as_path(), real.as_path()],
+        );
+        assert_eq!(merged, format!("/usr/local/bin{SEP}/usr/bin"));
     }
 
     #[test]
@@ -242,7 +282,66 @@ mod tests {
         // A slice of only whitespace/empty entries must leave the base
         // untouched — the helper should never panic on missing entries.
         let empty = PathBuf::from("");
-        let merged = merge_extra_path("/usr/bin:/bin", &[empty.as_path()]);
-        assert_eq!(merged, "/usr/bin:/bin");
+        let base = format!("/usr/bin{SEP}/bin");
+        let merged = merge_extra_path(&base, &[empty.as_path()]);
+        assert_eq!(merged, base);
+    }
+
+    /// `command_with_path` is the single-shot sibling of `spawn`: every
+    /// direct `Command::new` for an external tool (`git`, `tar`, …) should
+    /// route through here so the GUI shell's children inherit the merged
+    /// PATH instead of the system-only PATH they would otherwise see.
+    /// The Debug formatter of `Command` only reports the program and args
+    /// (env entries live in an opaque internal table on every Rust
+    /// version we care about), so we exercise the actual spawn path:
+    /// the test runs a tiny shell-less child on every supported host
+    /// and checks the child's `$PATH` echoes the merged value, not the
+    /// bare inherited PATH that would surface as the Windows bug.
+    #[test]
+    fn command_with_path_stamps_merged_path_on_child() {
+        use std::process::Stdio;
+
+        let mut cmd = command_with_path(if cfg!(windows) {
+            "cmd.exe"
+        } else {
+            "/bin/sh"
+        });
+        // `cmd.exe /C "echo %PATH%"` and `/bin/sh -c 'echo "$PATH"'` both
+        // round-trip the inherited PATH through the child untouched, so
+        // any divergence from `env::merged_path()` is the helper's fault.
+        let child_path: String = if cfg!(windows) {
+            "%PATH%".to_string()
+        } else {
+            "$PATH".to_string()
+        };
+        let marker = "__DSH_TEST_PATH_MARKER__";
+        if cfg!(windows) {
+            cmd.arg("/C")
+                .arg(format!("echo {child_path} & echo {marker}"));
+        } else {
+            cmd.arg("-c")
+                .arg(format!("echo {child_path}; echo {marker}"));
+        }
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = quiet(&mut cmd).spawn().expect("spawn child");
+        let output = child.wait_with_output().expect("collect output");
+        assert!(
+            output.status.success(),
+            "child must exit cleanly, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let marker_idx = stdout
+            .find(marker)
+            .unwrap_or_else(|| panic!("child never printed marker: {stdout:?}"));
+        // PATH line is everything before the marker line; trim the
+        // trailing newline so we compare against the helper's exact output.
+        let stamped = stdout[..marker_idx].trim_end().to_string();
+        assert_eq!(
+            stamped,
+            crate::env::merged_path(),
+            "child must inherit the merged PATH stamped by the helper"
+        );
     }
 }

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-01-desktop-plugin-staging-windows-rename.md
+2026-09-01-desktop-plugin-staging-windows-rename.md: 669d81348c646aa2a7f86d5fc8e1f7a83e3d4039
+2026-09-01-desktop-plugin-staging-windows-rename.zh.md: ee5d2db7a3077abffa22db2d1e20567dbd7ad4eb
