@@ -251,6 +251,38 @@ main {
   margin: 0;
 }
 
+/* Card head and list group head with an inline brand logo (npm / GitHub)
+   for the two list sections that have a clear external source. The
+   logo sits at the same baseline as the heading text via flex
+   align-items; the heading itself stays in a span so screen readers
+   read the section title without trying to announce the alt text. */
+.list-head-with-logo,
+.card-head-with-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.brand-logo {
+  display: block;
+  flex: 0 0 auto;
+  /* Square logos ~ 1em tall — sized to match the surrounding heading
+     text so the logo and the words sit on the same visual line. */
+  height: 1.2em;
+  width: 1.2em;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+/* GitHub's octocat on a black rounded square; the white background
+   the .brand-logo rule sets would make the mark look pale and
+   washed out against the dark sidebar surface. Override with
+   transparent + the logo's own background. */
+.github-logo {
+  background: transparent;
+}
+
 .head-meta {
   display: flex;
   align-items: center;
@@ -425,6 +457,43 @@ main::-webkit-scrollbar-thumb,
   }
   /* btn-row already wraps (flex-wrap: wrap); 14px button padding is
      fine for the narrow main column. */
+  /* Card head on a 480px window: the title (h2) and the right-side
+     meta (`已安装 N 个` + 检查更新 button) would crowd into one
+     row. Let the card-head wrap so the meta drops to a second line
+     with the button still at the row's right edge. Same trick on
+     the catalog's card-head. */
+  .card-head {
+    flex-wrap: wrap;
+  }
+  .head-meta {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+  }
+  /* install-row: at 480px the input + 2 selects + button row would
+     overflow. Let the input take the full first row, then the
+     selects + button share the second row with the button right-
+     aligned. The min-widths keep each select readable. */
+  .install-row {
+    flex-wrap: wrap;
+  }
+  .install-row input {
+    flex: 1 1 100%;
+  }
+  .install-row select {
+    min-width: 96px;
+    flex: 1 1 auto;
+  }
+  .install-row button {
+    flex: 1 1 auto;
+  }
+  /* Status card action row: the four buttons (关闭工作台 / 打开窗口
+     / 查看日志 / 检查桌面端更新) need to fit on a 480px main
+     column. They already wrap; tighten the per-button padding so
+     two buttons fit on one row at the new width. */
+  .card .btn-row button {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
 }
 
 h2,

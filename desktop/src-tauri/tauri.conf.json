@@ -11,12 +11,12 @@
       {
         "label": "main",
         "title": "DeepSeek Harness 桌面端",
-        "width": 650,
+        "width": 480,
         "height": 800,
         "minWidth": 480,
         "minHeight": 600,
         "center": true,
-        "resizable": true
+        "resizable": false
       }
     ],
     "security": {
