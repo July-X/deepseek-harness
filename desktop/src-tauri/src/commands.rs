@@ -334,10 +334,17 @@ pub async fn start_kernel(app: AppHandle) -> Result<u16, String> {
 /// tears down the whole workbench rather than leaving a dead webview behind.
 /// When the shell restarted since it spawned the kernel, the in-memory child
 /// is gone but the pid file still names the process to reap.
+///
+/// The harness window is created with `closable(false)` (see `open_harness`),
+/// so the OS title-bar close button is disabled and an accidental click on
+/// it cannot drop the user's session. The deliberate path back through this
+/// command still has to work, so the window goes through `destroy()` —
+/// which forces the OS to close without honoring the closable flag — rather
+/// than `close()`, which would be blocked by the same flag it set.
 #[tauri::command]
 pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("harness") {
-        let _ = window.close();
+        let _ = window.destroy();
     }
     let data_dir = app.state::<AppState>().data_dir.clone();
     // kernel::stop waits for the child to exit (up to its kill timeout);
@@ -370,6 +377,16 @@ pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
 /// inside a synchronous command deadlocks on Windows (per
 /// `WebviewWindowBuilder::new` docs), and even on macOS/Linux keeping the
 /// main thread free for the eventual webview setup is the safer default.
+///
+/// The window is created with `closable(false)` so the OS title-bar close
+/// button is greyed out: an accidental click in the middle of a long task
+/// would otherwise drop the user's session. The deliberate path back
+/// through `stop_kernel` still works because that command uses `destroy()`
+/// rather than `close()`, which forces the OS to honor the tear-down even
+/// when the chrome close button is disabled. The Linux GTK+ backend is the
+/// documented exception: it may not grey the button out for windows that
+/// are already visible, so on Linux this is a behavioural hint rather than
+/// a hard guarantee.
 #[tauri::command]
 pub fn open_harness(app: AppHandle) -> Result<(), String> {
     let data_dir = crate::kernel::data_dir(&app);
@@ -393,6 +410,7 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
             let result = WebviewWindowBuilder::new(&handle, "harness", WebviewUrl::External(url))
                 .title("DeepSeek Harness 工作台")
                 .inner_size(1280.0, 840.0)
+                .closable(false)
                 .build();
             if let Err(e) = result {
                 eprintln!("dsh-desktop: failed to open harness window: {e}");
