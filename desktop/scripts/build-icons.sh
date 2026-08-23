@@ -39,13 +39,15 @@ done
 SUPER=1024
 rsvg-convert -w "$SUPER" -h "$SUPER" assets/whale-icon-small.svg -o "$TMP/small-super.png"
 for s in 16 24 32 48 64; do
-  magick "$TMP/small-super.png" -filter LanczosSharp -resize "${s}x${s}" "$TMP/small-$s.png"
+  magick "$TMP/small-super.png" -filter LanczosSharp -resize "${s}x${s}" \
+    -define png:color-type=6 "$TMP/small-$s.png"
 done
 
 # ui/whale-icon.png stays at 128 from the SMALL master: the panel renders it
 # at 60 CSS px so small-master geometry is correct, but we still supersample
 # to keep the white highlight dot and spark rays sharp instead of cairo-blurred.
-magick "$TMP/small-super.png" -filter LanczosSharp -resize 128x128 "$TMP/small-128.png"
+magick "$TMP/small-super.png" -filter LanczosSharp -resize 128x128 \
+  -define png:color-type=6 "$TMP/small-128.png"
 
 # Desktop bitmaps.
 cp "$TMP/small-32.png" "$ICONS/32x32.png"
