@@ -133,6 +133,29 @@ pub fn get_kernel_log(state: State<'_, AppState>) -> String {
     )
 }
 
+/// Reveal the shell's data directory in the OS file manager.
+///
+/// The path comes from `AppState.data_dir`, which `lib::setup` resolves
+/// from `kernel::data_dir` and creates on first launch, so the directory
+/// always exists at runtime. Going through the server side (instead of
+/// letting the UI call `opener.open_path` directly) bypasses the opener
+/// plugin's IPC scope check — `opener:default` only grants `open_url` /
+/// `reveal_item_in_dir` / default URLs, not `open_path`. The `open` crate
+/// that backs the plugin dispatches per-OS: `open` on macOS launches
+/// Finder with the directory selected in its parent, `cmd /C start ""` on
+/// Windows opens File Explorer on the directory itself.
+#[tauri::command]
+pub async fn open_data_dir(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = state.data_dir.clone();
+    app.opener()
+        .open_path(path.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|e| format!("无法打开数据目录：{e}"))
+}
+
 // --- shell self-update -----------------------------------------------------
 
 /// Check GitHub for a newer shell release (manual「检查更新」button).

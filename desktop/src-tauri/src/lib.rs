@@ -48,6 +48,7 @@ pub fn run() {
             commands::detect_node,
             commands::save_settings,
             commands::get_kernel_log,
+            commands::open_data_dir,
             commands::check_shell_update,
             commands::install_shell_update,
             commands::fetch_releases,

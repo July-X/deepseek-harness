@@ -325,6 +325,24 @@ h3 {
   word-break: break-all;
 }
 
+/* Inline action button beside a kv value (e.g. "打开" next to the data
+   directory path). The path keeps its wrapping behaviour; the button
+   stays a fixed-size sibling on the right. */
+.kv dd.kv-with-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.kv dd.kv-with-action .kv-path {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+button.btn-small {
+  padding: 4px 10px;
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+
 kbd,
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

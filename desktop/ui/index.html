@@ -81,6 +81,9 @@
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
     </symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </symbol>
   </svg>
 
   <div class="layout">
@@ -129,7 +132,12 @@
             <dt>Node.js</dt>
             <dd id="kernelNode">—</dd>
             <dt>数据目录</dt>
-            <dd id="kernelHome">—</dd>
+            <dd class="kv-with-action">
+              <span id="kernelHome" class="kv-path">—</span>
+              <button id="btnOpenDataDir" type="button" class="ghost btn-small" title="在系统文件管理器中打开数据目录">
+                <svg class="icon"><use href="#i-folder" /></svg><span>打开</span>
+              </button>
+            </dd>
             <dt>桌面端版本</dt>
             <dd id="shellVersion">—</dd>
           </dl>

@@ -422,6 +422,13 @@ function showShellUpdateBanner(version) {
   $('btnShellInstall').classList.remove('hidden');
 }
 
+// Open the shell's data directory in the OS file manager (Finder on
+// macOS, Explorer on Windows). The Rust command reads AppState.data_dir
+// and hands it to the opener plugin, which dispatches per-OS.
+function openDataDir() {
+  invoke('open_data_dir').catch((e) => toast('打开数据目录失败：' + e, 5000));
+}
+
 function checkShellUpdate(manual) {
   invoke('check_shell_update')
     .then((info) => {
@@ -649,6 +656,7 @@ $('btnSaveSettings').addEventListener('click', saveSettings);
 $('btnProgressClose').addEventListener('click', closeProgress);
 $('btnShellCheck').addEventListener('click', () => checkShellUpdate(true));
 $('btnShellInstall').addEventListener('click', installShellUpdate);
+$('btnOpenDataDir').addEventListener('click', openDataDir);
 
 // Startup self-update discovery: the shell emits this after its background
 // check; the manual button covers on-demand checks.
