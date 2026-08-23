@@ -7,6 +7,15 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <!-- Second titlebar pulse bar — sits under the OS native titlebar
+       (top:0, height 3px) and is offset by half a cycle (3.84s) so
+       the sweep reads as continuous rather than a single dash crossing
+       then dead space. Mounted as a direct child of <body> so the
+       `body > [data-titlebar-pulse='2']` selector in styles.css hits
+       it; zero-build page, so this node ships as static markup
+       instead of being injected by JS at boot (the dsh web workbench
+       uses BootPage.installTitlebarPulse() for the same job). -->
+  <div data-titlebar-pulse="2" aria-hidden="true"></div>
   <!-- Inline SVG sprite: zero-build page, so icons ship as stroke symbols
        referenced via <use href="#i-…">; stroke/fill come from the .icon CSS. -->
   <svg class="svg-sprite" aria-hidden="true">
