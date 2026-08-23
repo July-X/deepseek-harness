@@ -37,8 +37,6 @@ use crate::settings::{self, Settings};
 
 /// dsh's own home directory name (see `@deepseek-ai/dsh-home-paths`).
 pub const DSH_HOME_DIR_NAME: &str = ".dsh";
-/// User-facing display form for the dsh home.
-pub const DSH_HOME_LABEL: &str = "~/.dsh";
 /// Shell metadata root under the dsh home: `<dsh_home>/desktop/`.
 const SHELL_SUBDIR: &str = "desktop";
 /// Relative path of the kernel's CLI entry inside an installed package.
@@ -62,7 +60,11 @@ pub struct KernelStatus {
     pub active_installed: bool,
     pub running: bool,
     pub port: u16,
-    pub dsh_home: String,
+    /// Display form of the shell's metadata root, with the user's home
+    /// prefix shortened to `~` when the path sits under it. The UI shows
+    /// this next to the「打开」button, which opens the same path — keeping
+    /// the label and the action on the same directory.
+    pub data_dir: String,
     pub ever_installed: bool,
 }
 
@@ -91,6 +93,25 @@ fn dirs_home() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Render `path` for display by shortening its home prefix to `~`. Falls
+/// back to the full string when the path doesn't sit under the user's OS
+/// home (e.g. `DSH_HOME` was redirected to a custom location); in that
+/// case the user already knows the path is non-standard and wants to see
+/// it verbatim. Windows backslashes are normalized to forward slashes so
+/// the display form matches the `~/.dsh/...` convention used in docs.
+fn display_short(path: &Path) -> String {
+    let home = dirs_home();
+    if let Ok(rel) = path.strip_prefix(&home) {
+        let mut out = String::from("~");
+        if !rel.as_os_str().is_empty() {
+            out.push('/');
+            out.push_str(&rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"));
+        }
+        return out;
+    }
+    path.display().to_string()
 }
 
 pub fn kernels_dir(data_dir: &Path) -> PathBuf {
@@ -192,7 +213,7 @@ pub fn status(data_dir: &Path, settings: &Settings) -> KernelStatus {
         active_installed,
         running: port_open(settings.port),
         port: settings.port,
-        dsh_home: DSH_HOME_LABEL.to_string(),
+        data_dir: display_short(data_dir),
     }
 }
 
@@ -559,5 +580,39 @@ pub fn kill_pid(pid: u32) {
         let mut cmd = Command::new("taskkill");
         cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
         let _ = quiet(&mut cmd).status();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `display_short` is what the UI shows next to the「打开」button;
+    /// the button must open the same directory the label names, otherwise
+    /// users land one level deep and wonder why the path mismatches. The
+    /// home-prefix substitution also has to stay consistent across the
+    /// forward/backslash boundary on Windows.
+    #[test]
+    fn display_short_substitutes_home_with_tilde() {
+        let home = dirs_home();
+        let nested = home.join(".dsh").join("desktop");
+        assert_eq!(display_short(&nested), "~/.dsh/desktop");
+    }
+
+    #[test]
+    fn display_short_falls_back_to_full_path_outside_home() {
+        // Custom DSH_HOME destinations live outside $HOME; show them verbatim
+        // so users with non-standard layouts can verify where their shell
+        // data actually went.
+        let outside = PathBuf::from("/custom/redirect/.dsh/desktop");
+        assert_eq!(display_short(&outside), outside.display().to_string());
+    }
+
+    #[test]
+    fn display_short_keeps_tilde_only_when_path_equals_home() {
+        // Edge case: data_dir resolves to the home itself (no `.dsh/desktop`
+        // suffix). The output should still be a single `~`, not `~/`.
+        let home = dirs_home();
+        assert_eq!(display_short(&home), "~");
     }
 }

@@ -183,7 +183,7 @@ function renderStatus(view) {
   setText('kernelNode', node.ok
     ? [node.path, node.version].filter(Boolean).join('  ')
     : '未检测到可用 Node（' + node.reason + '）');
-  setText('kernelHome', kernel.dsh_home);
+  setText('kernelHome', kernel.data_dir);
   setText('shellVersion', 'v' + view.shell_version);
 
   setText('updateInstalled', String((kernel.installed || []).length) + ' 个');
