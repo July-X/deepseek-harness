@@ -59,8 +59,13 @@ body {
 .brand {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 0 6px;
+  /* `flex-wrap: wrap` lets the status pill drop below the wordmark
+     when the column doesn't have room for it on the same row
+     (the 208px wide sidebar in particular; the 660px narrow layout
+     has enough headroom for logo + wordmark + pill on one row). */
 }
 
 .brand img {
@@ -71,13 +76,31 @@ body {
 
 .brand h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  line-height: 1.05;
+}
+
+/* The brand HTML splits the wordmark across two siblings (h2 "DeepSeek"
+   + p "Harness") so the markup reads naturally when voice-over picks
+   it up. Here we keep both as block elements so they render as
+   three flush-left lines under the logo (DeepSeek / Harness / 桌面
+   管理台), with DeepSeek visibly larger than Harness and the
+   subtitle. Block display also gives all three lines the same
+   left edge — they share the parent <div>'s box so the indent is
+   one consistent value rather than the uneven layout that the
+   earlier inline trick produced. */
+.brand div > p:not(.subtitle) {
+  margin: 0;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.2px;
 }
 
 .subtitle {
-  margin: 1px 0 0;
+  display: block;
+  margin: 0;
   color: var(--muted);
   font-size: 11px;
 }
@@ -118,16 +141,22 @@ body {
 }
 
 .status-pill {
-  margin-top: auto;
   display: flex;
   align-items: center;
-  align-self: flex-start;
   gap: 8px;
   padding: 6px 12px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--card);
   font-size: 13px;
+  /* The pill is now a flex child of .brand rather than a direct child
+     of .sidebar, so margin-left: auto pins it to the right edge of
+     the brand row (logo on the left, wordmark in the middle, pill
+     on the right). The earlier margin-top: auto + align-self:
+     flex-start pair was for the old "sidebar > status-pill" column
+     layout, where the pill needed to be bottom-aligned under the
+     menu in narrow mode. */
+  margin-left: auto;
 }
 
 .dot {
@@ -200,6 +229,14 @@ main {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 20px 22px;
+  /* Flex column so that a .btn-row inside a card can pin itself to
+     the bottom of the card via margin-top: auto. The card body
+     (head, kv, warning) keeps its natural block flow; only the
+     .btn-row takes the bottom slot. Cards without a .btn-row (the
+     versions / plugins / catalog cards) render unchanged because
+     nothing in them has a margin-top: auto rule. */
+  display: flex;
+  flex-direction: column;
 }
 
 .card-head {
@@ -295,10 +332,19 @@ main::-webkit-scrollbar-thumb,
   .sidebar {
     flex: 0 0 auto;
     width: auto;
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 12px;
+    /* Column layout so the menu can pin to the bottom of the chrome
+       row via margin-top: auto (which only works along the main
+       axis in flex). The previous row layout had the menu sitting
+       at the top of the chrome row, with the status pill dropped
+       below it on a second wrap; the menu wasn't actually
+       "anchored" to the bottom — it was anchored to the top. With
+       column, the brand block sits at the top, the menu can sweep
+       down to the bottom edge, and the status pill stays just
+       under the menu. */
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 10px;
     padding: 12px 14px;
     border-right: none;
     border-bottom: 1px solid var(--border);
@@ -313,19 +359,30 @@ main::-webkit-scrollbar-thumb,
     flex: 0 0 auto;
   }
   .brand img {
-    width: 32px;
-    height: 32px;
+    width: 64px;
+    height: 64px;
   }
-  .brand h2 {
-    font-size: 13px;
+  .brand h2,
+  .brand div > p:not(.subtitle) {
+    /* Narrow layout keeps the same hierarchy as the wide layout:
+       DeepSeek larger than Harness, both bold, three flush-left
+       lines under the logo. */
+    font-size: inherit;
   }
   .subtitle {
-    display: none;
+    display: block;
   }
   .menu {
+    /* The sidebar is now flex-column (see .sidebar above); the menu
+       uses margin-top: auto along the column's main axis to pin
+       itself to the bottom of the chrome bar. Inside the menu the
+       four .menu-item children still render as a horizontal row
+       so "概览 / 内核版本 / 插件 / 设置" stays one line at the
+       bottom of the chrome bar. */
     flex-direction: row;
     flex-wrap: wrap;
-    flex: 1 1 auto;
+    flex: 0 0 auto;
+    margin-top: auto;
   }
   .menu-item {
     width: auto;
@@ -333,8 +390,13 @@ main::-webkit-scrollbar-thumb,
     font-size: 13px;
   }
   .status-pill {
-    margin-top: 0;
-    margin-left: auto;
+    /* Now lives inside .brand; .brand is flex row at every width
+       (the wide layout inherited from the default rule, the narrow
+       layout inherits from the same default), and the pill's
+       margin-left: auto on the parent rule pins it to the brand
+       row's right edge. The narrow-breakpoint overrides here only
+       tighten the font-size / padding to match the rest of the
+       narrow chrome. */
     font-size: 12px;
     padding: 5px 10px;
   }
@@ -434,6 +496,12 @@ code {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  /* Pin to the bottom of the surrounding .card (which is now a flex
+     column) regardless of how tall the card body is. On cards with
+     little content (e.g. right after the shell boots) the buttons
+     sit at the bottom edge of the card; on cards with many kv rows
+     they still sit at the bottom after the body. */
+  margin-top: auto;
 }
 
 button {
