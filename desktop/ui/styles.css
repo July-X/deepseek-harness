@@ -139,12 +139,45 @@ body {
 
 .dot.ok {
   background: var(--good);
-  box-shadow: 0 0 8px var(--good);
+  /* Breathing pulse — three layers swing together so the running
+     state reads as a live indicator rather than a static label:
+       - inner halo radius 6px ↔ 14px (sharp green close to the dot)
+       - outer halo radius 8px ↔ 24px (soft green bleed into the panel)
+       - dot itself scales 0.9 ↔ 1.15 (the dot visibly breathes, not
+         just the glow around it)
+       - opacity 0.55 ↔ 1 (the trough is dim, the peak is full)
+     2.4s ease-in-out sits between a human breath and the
+     7.68s chrome-row sweep so the two never beat in sync; the
+     dot also stays small enough (max ~10.4px wide at the peak)
+     that the scaling never crosses into "jumping" territory. */
+  animation: status-breathe 2.4s ease-in-out infinite;
 }
 
 .dot.bad {
   background: var(--bad);
   box-shadow: 0 0 8px var(--bad);
+  /* Stopped state — no breathing. A static red dot tells the user
+     the kernel is reachable but not alive, distinct from the
+     running-state pulse. */
+  animation: none;
+}
+
+@keyframes status-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 0 4px rgba(52, 211, 153, 0.45),
+      0 0 8px rgba(52, 211, 153, 0.30);
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+  50% {
+    box-shadow:
+      0 0 10px rgba(52, 211, 153, 1),
+      0 0 24px rgba(52, 211, 153, 0.65);
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 
 main {
