@@ -325,17 +325,20 @@ h3 {
   word-break: break-all;
 }
 
-/* Inline action button beside a kv value (e.g. "打开" next to the data
-   directory path). The path keeps its wrapping behaviour; the button
-   stays a fixed-size sibling on the right. */
+/* Inline action button beside a kv value (e.g. "打开" right after the
+   data directory path). The path keeps its natural width so the button
+   sits flush against the text; long paths still wrap because the flex
+   item is allowed to shrink below content size (min-width: 0). */
 .kv dd.kv-with-action {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .kv dd.kv-with-action .kv-path {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
+  word-break: break-all;
 }
 button.btn-small {
   padding: 4px 10px;
