@@ -315,8 +315,15 @@ pub fn install_version(
         PNPM_REPORTER,
         spec.as_str(),
     ];
-    let status =
-        run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut on_progress).map_err(pnpm_spawn_err)?;
+    let status = run_pnpm(
+        pnpm_exe,
+        &args,
+        &dir,
+        &log_path,
+        &[pnpm_exe.parent().unwrap_or(Path::new("."))],
+        &mut on_progress,
+    )
+    .map_err(pnpm_spawn_err)?;
     on_progress("pnpm 已退出，正在校验安装结果");
 
     // pnpm ≥ 10 在存在被忽略的构建脚本（见 `pnpm approve-builds`）时会打印
@@ -373,15 +380,19 @@ pub(crate) fn pnpm_spawn_err(e: io::Error) -> AppError {
 /// line to both `log_path` and `on_progress`. Thin wrapper over the shared
 /// `run_with_progress` helper, which already handles the Windows `.cmd`
 /// routing, dual-stream drain, and silent-period heartbeat that pnpm
-/// installs need to surface to the UI.
+/// installs need to surface to the UI. `extra_path_dirs` is forwarded so
+/// the child can locate the validated `node` on its PATH — see
+/// `process::run_with_progress` for why pnpm's spawn environment is
+/// otherwise empty on macOS-launched `.app` bundles.
 pub(crate) fn run_pnpm(
     pnpm_exe: &Path,
     args: &[&str],
     cwd: &Path,
     log_path: &Path,
+    extra_path_dirs: &[&Path],
     on_progress: impl FnMut(&str),
 ) -> io::Result<std::process::ExitStatus> {
-    run_with_progress(pnpm_exe, args, cwd, log_path, on_progress)
+    run_with_progress(pnpm_exe, args, cwd, log_path, extra_path_dirs, on_progress)
 }
 
 /// Whether something is already listening on `127.0.0.1:port`.

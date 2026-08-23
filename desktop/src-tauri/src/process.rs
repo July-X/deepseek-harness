@@ -38,11 +38,22 @@ pub fn quiet(cmd: &mut Command) -> &mut Command {
 /// A heartbeat keeps the caller informed when the child stays silent for
 /// tens of seconds while resolving the dependency graph or talking to the
 /// npm registry.
+///
+/// `extra_path_dirs` prepends the listed directories to the inherited
+/// `PATH` on the child before it runs anything. macOS `.app` bundles launch
+/// from a launchd environment whose `PATH` is just `/usr/bin:/bin:/usr/sbin:
+/// /sbin`, so a user who installed Node and pnpm via Homebrew or nvm lives
+/// outside that path; a child that invokes a Node-shebanged script
+/// (`tsdown`, `tsc`, `node ./foo.js`, …) then dies with `env: node: No
+/// such file or directory` even though the parent could find both binaries
+/// to spawn them. Prepending `pnpm_exe.parent()` (and `node_dir` when the
+/// caller has it) makes the child see the same `node` the parent used.
 pub fn run_with_progress(
     exe: &Path,
     args: &[&str],
     cwd: &Path,
     log_path: &Path,
+    extra_path_dirs: &[&Path],
     mut on_progress: impl FnMut(&str),
 ) -> io::Result<ExitStatus> {
     let mut log = fs::OpenOptions::new()
@@ -51,7 +62,7 @@ pub fn run_with_progress(
         .truncate(true)
         .open(log_path)?;
 
-    let mut child = spawn(exe, args, cwd)?;
+    let mut child = spawn(exe, args, cwd, extra_path_dirs)?;
     let stdout = child.stdout.take().expect("child stdout was piped");
     let stderr = child.stderr.take().expect("child stderr was piped");
 
@@ -96,7 +107,7 @@ pub fn run_with_progress(
     reap(child)
 }
 
-fn spawn(exe: &Path, args: &[&str], cwd: &Path) -> io::Result<Child> {
+fn spawn(exe: &Path, args: &[&str], cwd: &Path, extra_path_dirs: &[&Path]) -> io::Result<Child> {
     // Pin every child we spawn (pnpm/npm and friends) at the shell's
     // configured npm registry so the mirror choice is enforceable even when
     // the user's global .npmrc points elsewhere or a project-local .npmrc
@@ -108,7 +119,13 @@ fn spawn(exe: &Path, args: &[&str], cwd: &Path) -> io::Result<Child> {
     // live after `npm install -g`) is dropped unless we re-stamp it.
     // `env::merged_path` reads `HKCU\Environment\Path` once and joins it
     // onto whatever the process already has.
-    let path = crate::env::merged_path();
+    //
+    // `extra_path_dirs` is layered on top of that: caller-supplied
+    // directories (the validated `node` bin dir, `pnpm_exe.parent()` so
+    // pnpm's own shim family is reachable, …) are prepended in order so
+    // any Node-shebanged child can resolve `node` even on macOS .app
+    // bundles, whose launchd PATH is system-only.
+    let path = merge_extra_path(crate::env::merged_path(), extra_path_dirs);
     #[cfg(windows)]
     {
         let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
@@ -135,9 +152,97 @@ fn spawn(exe: &Path, args: &[&str], cwd: &Path) -> io::Result<Child> {
     }
 }
 
+/// Prepend `extra` entries to `base`. Empty / non-existent entries are
+/// skipped so a caller that has no extra directories pays no cost. Path
+/// separators follow the host (`;` on Windows, `:` elsewhere).
+fn merge_extra_path(base: &str, extra: &[&Path]) -> String {
+    if extra.is_empty() {
+        return base.to_string();
+    }
+    #[cfg(windows)]
+    const SEP: char = ';';
+    #[cfg(not(windows))]
+    const SEP: char = ':';
+    let mut out = String::new();
+    let mut first = true;
+    for dir in extra {
+        let Some(text) = dir.to_str() else { continue };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !first {
+            out.push(SEP);
+        }
+        out.push_str(trimmed);
+        first = false;
+    }
+    if !first {
+        if !base.is_empty() {
+            out.push(SEP);
+            out.push_str(base);
+        }
+    } else {
+        out.push_str(base);
+    }
+    out
+}
+
 fn reap(mut child: Child) -> io::Result<ExitStatus> {
     // On Windows `ComSpec /C` makes cmd.exe the direct child and the real
     // program its grandchild; waiting on cmd only returns after the
     // grandchild has already exited, so a plain wait is right everywhere.
     child.wait()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn merge_extra_path_no_extras_returns_base() {
+        assert_eq!(merge_extra_path("/usr/bin:/bin", &[]), "/usr/bin:/bin");
+    }
+
+    #[test]
+    fn merge_extra_path_prepends_single_dir() {
+        let dir = PathBuf::from("/usr/local/bin");
+        let merged = merge_extra_path("/usr/bin:/bin", &[dir.as_path()]);
+        assert_eq!(merged, "/usr/local/bin:/usr/bin:/bin");
+    }
+
+    #[test]
+    fn merge_extra_path_preserves_order() {
+        let first = PathBuf::from("/opt/homebrew/bin");
+        let second = PathBuf::from("/usr/local/bin");
+        let merged = merge_extra_path("/usr/bin", &[first.as_path(), second.as_path()]);
+        assert_eq!(merged, "/opt/homebrew/bin:/usr/local/bin:/usr/bin");
+    }
+
+    #[test]
+    fn merge_extra_path_skips_empty_segments() {
+        let empty = PathBuf::from("");
+        let blank = PathBuf::from("   ");
+        let real = PathBuf::from("/usr/local/bin");
+        let merged =
+            merge_extra_path("/usr/bin", &[empty.as_path(), blank.as_path(), real.as_path()]);
+        assert_eq!(merged, "/usr/local/bin:/usr/bin");
+    }
+
+    #[test]
+    fn merge_extra_path_empty_base_still_includes_extras() {
+        let dir = PathBuf::from("/usr/local/bin");
+        let merged = merge_extra_path("", &[dir.as_path()]);
+        assert_eq!(merged, "/usr/local/bin");
+    }
+
+    #[test]
+    fn merge_extra_path_all_extras_blank_falls_back_to_base() {
+        // A slice of only whitespace/empty entries must leave the base
+        // untouched — the helper should never panic on missing entries.
+        let empty = PathBuf::from("");
+        let merged = merge_extra_path("/usr/bin:/bin", &[empty.as_path()]);
+        assert_eq!(merged, "/usr/bin:/bin");
+    }
 }

@@ -277,11 +277,17 @@ pub fn ensure_pnpm(
     })?;
     on_progress("未检测到 pnpm，正在通过 npm 自动安装（首次需要联网，常见 30 秒~2 分钟）");
     let cwd = node_dir.to_path_buf();
+    // `npm` is a Node.js script with a `#!/usr/bin/env node` shebang and
+    // also runs lifecycle scripts during `install -g`. Prepend both the
+    // validated node bin dir and `npm.parent()` so the child can resolve
+    // `node` even when the GUI inherited a launchd-only PATH.
+    let npm_dir = npm.parent().unwrap_or(std::path::Path::new("."));
     let status = run_with_progress(
         &npm,
         &["install", "-g", "pnpm"],
         &cwd,
         log_path,
+        &[node_dir, npm_dir],
         |line| on_progress(line),
     )
     .map_err(|e| {

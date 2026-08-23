@@ -824,9 +824,16 @@ fn build_git_plugin(
         "--config.enable-pre-post-scripts=true",
     ];
     // pnpm runs the package's `prepare` lifecycle script automatically after
-    // install when enable-pre-post-scripts is on.
-    let status = kernel::run_pnpm(pnpm_exe, &args, dest, &log_path, &mut *on_progress)
-        .map_err(kernel::pnpm_spawn_err)?;
+    // install when enable-pre-post-scripts is on. `pnpm_exe.parent()` is
+    // prepended to the child's PATH so the lifecycle shell can resolve
+    // `node` (and any sibling shebanged tool) even when the GUI inherited
+    // a launchd-only PATH that does not list the user's Homebrew / nvm bin
+    // directory; without it the prepare step exits 127 with
+    // `env: node: No such file or directory`.
+    let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
+    let status =
+        kernel::run_pnpm(pnpm_exe, &args, dest, &log_path, &[pnpm_dir], &mut *on_progress)
+            .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() {
         return Err(AppError::Plugin(format!(
             "插件构建失败（退出码 {:?}）：`prepare` 未成功生成入口。详情见 {}",
@@ -950,8 +957,10 @@ fn install_store_deps(
         kernel::PNPM_REPORTER,
         kernel::PNPM_NO_STRICT_DEP_BUILDS,
     ];
-    let status = kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &mut *on_progress)
-        .map_err(kernel::pnpm_spawn_err)?;
+    let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
+    let status =
+        kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &[pnpm_dir], &mut *on_progress)
+            .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() && !dir.join("node_modules").is_dir() {
         return Err(AppError::Plugin(format!(
             "插件依赖安装失败（退出码 {:?}），详情见日志：{}",
@@ -1284,7 +1293,11 @@ pub fn ensure_wiring(
     let log_path = wiring_log_path(data_dir);
     // The profile's install only needs a usable node_modules, which the
     // existing fallback already tolerates when wiring is unchanged, so
-    // silence pnpm's ignored-builds false positive here.
+    // silence pnpm's ignored-builds false positive here. `pnpm_exe.parent()`
+    // is prepended to the child's PATH so any Node-shebanged lifecycle
+    // script pnpm may invoke finds the same `node` the parent used to
+    // spawn pnpm itself.
+    let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
     let status = kernel::run_pnpm(
         pnpm_exe,
         &[
@@ -1294,7 +1307,8 @@ pub fn ensure_wiring(
         ],
         &profile,
         &log_path,
-        on_progress,
+        &[pnpm_dir],
+        &mut *on_progress,
     )
     .map_err(|e| AppError::Io(format!("无法运行 pnpm（{e}）")))?;
     if !status.success() {
