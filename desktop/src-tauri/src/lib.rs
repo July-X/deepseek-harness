@@ -46,6 +46,14 @@ pub fn run() {
                 data_dir.display(),
                 if cfg!(debug_assertions) { "dev" } else { "release" }
             );
+            // Reap orphaned dsh web kernels belonging to this data dir
+            // BEFORE anything manages state: a crashed/killed shell leaves
+            // its kernel running with cwd == data_dir, and two kernels on
+            // the same project dir append to the same session log, which
+            // corrupts it (seq gap). Must run before start_kernel can
+            // observe "port already open" and report the orphan as a
+            // healthy instance.
+            kernel::reap_orphans(&data_dir);
             app.manage(AppState {
                 data_dir,
                 running: Mutex::new(None),

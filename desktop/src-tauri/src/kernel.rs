@@ -140,15 +140,55 @@ fn dirs_home() -> PathBuf {
 /// the display form matches the `~/.dsh/...` convention used in docs.
 fn display_short(path: &Path) -> String {
     let home = dirs_home();
-    if let Ok(rel) = path.strip_prefix(&home) {
+    let display = if let Ok(rel) = path.strip_prefix(&home) {
         let mut out = String::from("~");
         if !rel.as_os_str().is_empty() {
             out.push('/');
             out.push_str(&rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"));
         }
-        return out;
+        out
+    } else {
+        path.display().to_string()
+    };
+    // Long data-dir paths (custom DSH_HOME, deep app-data fallback) would
+    // push the kv value column in the overview card to overflow. Elide
+    // the middle of the path while keeping the readable head (`~` prefix
+    // and the first two segments after it) and the tail (the final 2–3
+    // segments, which carry the identity of the directory). The ellipsis
+    // keeps the value hintful without needing the full string.
+    ellipsize_middle(&display, 38)
+}
+
+/// Collapse the middle of `s` to `…` when it exceeds `max_chars`, keeping
+/// the head (up to the first ~40% of the budget) and the tail (the rest).
+/// Whole path segments are preferred as cut points so the result reads
+/// as a real path, not a chopped string.
+fn ellipsize_middle(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
     }
-    path.display().to_string()
+    let head_budget = max_chars * 2 / 5;
+    let tail_budget = max_chars - head_budget;
+    // Preferred cut: at a '/' boundary so neither side ends mid-segment.
+    // Search inside the head range for the LAST '/' within head_budget,
+    // and inside the tail range for the FIRST '/' within tail_budget.
+    let head_cut = (0..head_budget).rev().find(|&i| chars[i] == '/');
+    let tail_start = chars.len() - tail_budget;
+    let tail_cut = (tail_start..chars.len()).find(|&i| chars[i] == '/');
+    let head_end = match head_cut {
+        // Keep the '/' itself on the head side (segments read whole).
+        Some(i) => i + 1,
+        None => head_budget,
+    };
+    let tail_begin = match tail_cut {
+        Some(i) => i,
+        None => tail_start,
+    };
+    let mut out: String = chars[..head_end].iter().collect();
+    out.push('…');
+    out.extend(chars[tail_begin..].iter());
+    out
 }
 
 pub fn kernels_dir(data_dir: &Path) -> PathBuf {
@@ -515,6 +555,81 @@ pub fn start_maybe(data_dir: &Path, node: &Path) -> Result<Option<Child>, AppErr
         AppError::Kernel("尚未选择内核版本，请先在“更新”页安装并切换到某一版本".into())
     })?;
     start(data_dir, node, &active, port).map(Some)
+}
+
+/// Reap orphaned dsh web kernels whose working directory equals `data_dir`.
+///
+/// A shell crash or a shell window that was killed without going through
+/// 「关闭工作台」leaves the kernel subprocess behind (setsid detached it
+/// from the shell's process group). The next shell launch finds the port
+/// already bound and `start_maybe` reports "already running" — but the
+/// orphan keeps writing session logs for the same project directory as a
+/// second instance would, which is exactly what produced the
+/// `corrupt session log: seq gap in committed region` failures seen in
+/// the workbench history. Reap: scan every `@deepseek-ai/dsh/bin.js web`
+/// process, compare its cwd with `data_dir`, and SIGTERM+SIGKILL (via
+/// kill_pid, which has the same pid-is-kernel guard) anything matching
+/// that is not the current shell's own in-memory child.
+///
+/// Safe against a second, deliberately-running shell instance on the SAME
+/// data dir? Not entirely: a second shell using the same data dir also
+/// runs its kernel with cwd == data_dir, so this scan would reap that
+/// kernel too. That is the desired outcome though — the desktop shell is
+/// single-instance per data dir (the dev / release split gives each
+/// build its own dir), and two kernels on one dir are exactly the
+/// corruption scenario this function exists to prevent.
+pub fn reap_orphans(data_dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let out = match Command::new("ps").args(["-eo", "pid,command"]).output() {
+            Ok(o) if o.status.success() => o,
+            _ => return,
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if !line.contains("@deepseek-ai/dsh/lib/bin.js") || !line.contains(" web ") {
+                continue;
+            }
+            let pid: u32 = match line.split_whitespace().next().and_then(|p| p.parse().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+            if pid == std::process::id() {
+                continue;
+            }
+            // Resolve the process's cwd: /proc/{pid}/cwd on Linux, lsof on
+            // macOS. Only entities whose cwd matches OUR data dir are ours
+            // to reap.
+            let cwd_matches = std::fs::read_link(format!("/proc/{pid}/cwd"))
+                .map(|p| p == data_dir)
+                .unwrap_or_else(|_| {
+                    Command::new("lsof")
+                        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+                        .output()
+                        .ok()
+                        .and_then(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .find(|l| l.starts_with('n'))
+                                .map(|l| std::path::PathBuf::from(&l[1..]))
+                        })
+                        .map(|p| p == data_dir)
+                        .unwrap_or(false)
+                });
+            if cwd_matches {
+                kill_pid(pid);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows: no /proc; wmic/wmic killed by newer PowerShell; the
+        // port-based fallback in stop_kernel covers the common path and
+        // PowerShell's Get-CimInstance is too slow to run per launch.
+        // Keep windows a no-op for now — orphan reaping there is a future
+        // task, and the pid-file/port fallback still lets the user stop.
+    }
 }
 
 /// Stop a running kernel child, reaping its whole process group where the
