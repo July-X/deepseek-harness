@@ -4,6 +4,7 @@
 
 ## 定位与边界
 
+- **不侵入内核代码**：`packages/`（含 `packages/client/web/`、`packages/core/` 等）是 `@deepseek-ai/dsh` 及其各分组下 npm 包的源码，由用户从 npm registry 自行安装官方版本；桌面壳**不**打包、不重发布、也不修改这些代码——任何对 `packages/` 的改动都不会随桌面壳 release 抵达用户机器。需要影响工作台窗口或内核行为的功能只能通过桌面壳自有边界（`src-tauri/` Rust 进程 + `ui/` 静态管理面板）实现；典型路径例如 `WebviewWindowBuilder::initialization_script()` 注入脚本、`kernel.rs` 子进程管理、`settings.rs` 配置落盘。如果一项改动"只能改内核"，推到对应的内核 PR 而不是合进桌面壳分支。仓库根的 [AGENTS.md](../AGENTS.md) 「dsh-desktop 范围约束」节是这条规则的简版。
 - dsh-desktop 是 DeepSeek Harness 的 Tauri v2 桌面外壳：管理面板（`ui/` 静态前端）+ Rust shell（`src-tauri/`），负责内核版本管理和启动 `dsh web`。
 - **独立交付物**：不加入仓库根的 pnpm workspace，不参与上游 lint / hygiene / release 门禁。在 `desktop/` 内安装依赖必须带 `--ignore-workspace`，否则 pnpm 会向上匹配仓库根的 `pnpm-workspace.yaml`，把整个 monorepo 装进当前命令。
 - 信任边界：仅信任官方 `deepseek-ai` 仓库与 npm 的 `@deepseek-ai` 命名空间；版本列表来自 npm registry（GitHub Releases 仅作回退）。

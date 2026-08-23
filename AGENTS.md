@@ -2,6 +2,19 @@
 
 DeepSeek Harness is a plugin-based agent harness on vendored Cordis: **everything is a plugin**. Read [docs/architecture.md](docs/architecture.md) before changing `packages/`; follow [docs/AGENTS.md](docs/AGENTS.md) for documentation.
 
+## dsh-desktop 范围约束
+
+桌面壳（[`desktop/`](desktop/)）是独立交付物，**不**发布、不重打包、也不修改 [`packages/`](packages/) 下的内核代码（`@deepseek-ai/dsh` 及其各分组下的包）。内核代码由用户从 npm registry 安装官方版本，桌面壳运行时不携带内核代码副本——任何对 `packages/` 的改动都不会随桌面壳 release 抵达用户机器。
+
+桌面壳要影响工作台窗口或内核行为时，必须通过自有边界（`desktop/src-tauri/` Rust 进程 + `desktop/ui/` 静态管理面板）实现。典型路径：
+
+- 工作台窗口加载的页面样式 / 行为覆盖 → `WebviewWindowBuilder::initialization_script()` 在创建 webview 时注入脚本或样式
+- 内核生命周期（启动 / 停止 / 端口 / 日志）→ `desktop/src-tauri/src/kernel.rs` 子进程管理
+- 用户配置 / 设置存储 → `desktop/src-tauri/src/settings.rs` + `~/.dsh/desktop/settings.json`
+- 任何"如果改内核代码就好了"的念头 → 停下来，先在桌面壳自有边界内找方案；如果确认只能改内核（例如新功能、bug fix），推到对应的内核 PR 而不是合进桌面壳分支
+
+完整约束、边界依据和具体示例见 [desktop/AGENTS.md](desktop/AGENTS.md)。
+
 ## Pre-release stance: foundation over blast radius
 
 **Remove this section at the first tagged release.** With no external consumers, prefer the correct foundation over compatibility shims: rename or repackage freely and update every reference together. Backends reject old on-disk formats. SQLite uses monotonic `SCHEMA_VERSION`; `dsh-session` keeps `SESSION_FORMAT_VERSION` at `0` with no compatibility promise.
