@@ -263,23 +263,60 @@ main::-webkit-scrollbar-thumb,
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
+    padding: 12px 14px;
     border-right: none;
     border-bottom: 1px solid var(--border);
+  }
+  /* Brand block: in the wide layout the 60×60 logo and "DeepSeek
+     Harness / 桌面管理台" two-line title sit comfortably in a 208px
+     column. In the narrow layout the sidebar is a horizontal menu, so
+     the logo shrinks and the subtitle drops — the wordmark alone
+     identifies the shell, the "桌面管理台" sub-label only made sense
+     under the sidebar logo. */
+  .brand {
+    flex: 0 0 auto;
+  }
+  .brand img {
+    width: 32px;
+    height: 32px;
+  }
+  .brand h2 {
+    font-size: 13px;
+  }
+  .subtitle {
+    display: none;
   }
   .menu {
     flex-direction: row;
     flex-wrap: wrap;
+    flex: 1 1 auto;
   }
   .menu-item {
     width: auto;
+    padding: 6px 10px;
+    font-size: 13px;
   }
   .status-pill {
     margin-top: 0;
     margin-left: auto;
+    font-size: 12px;
+    padding: 5px 10px;
   }
   main {
     overflow: visible;
+    padding: 16px;
+  }
+  .card {
+    padding: 16px 18px;
+  }
+  /* kv table: in the wide layout the label column is 110–160px which
+     leaves the value column room for full URLs / paths. In the narrow
+     layout the value column is much shorter, so trim the label
+     minimum to keep the value readable and tighten the row gap. */
+  .kv {
+    grid-template-columns: minmax(86px, 110px) 1fr;
+    gap: 6px 12px;
   }
   .updates-lists {
     grid-template-columns: 1fr;
@@ -289,6 +326,8 @@ main::-webkit-scrollbar-thumb,
   #pluginList {
     max-height: 42vh;
   }
+  /* btn-row already wraps (flex-wrap: wrap); 14px button padding is
+     fine for the narrow main column. */
 }
 
 h2,
