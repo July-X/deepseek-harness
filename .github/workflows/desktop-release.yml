@@ -106,7 +106,21 @@ jobs:
             - Windows x86_64（NSIS 安装包 .exe）
 
             使用方式：安装后在「内核版本」页安装并切换 deepseek-harness 内核版本即可使用。
-          releaseDraft: true
-          # The verify step derives this from the app version: any prerelease
-          # suffix (0.1.0-rc.1) marks the draft as a prerelease.
-          prerelease: ${{ fromJSON(steps.meta.outputs.prerelease) }}
+          releaseDraft: false
+          # Mark every shell release as a normal release on GitHub
+          # (not a prerelease) so the `/releases/latest/download/
+          # latest.json` endpoint that tauri.conf.json
+          # `plugins.updater.endpoints` points at is resolvable.
+          # Earlier versions derived the GitHub prerelease flag from
+          # a `-` in the version string (rc.1, rc.2, …) and marked
+          # the GitHub release prerelease; GitHub's
+          # `/releases/latest` API returns 404 when the latest
+          # release is a prerelease, so the in-app updater could
+          # never reach latest.json and the manual「检查桌面端更新」
+          # button silently reported「桌面端已是最新」. The version
+          # string itself is unchanged (still `0.1.0-rc.X` so
+          # Semver prerelease ordering keeps working in tauri-plugin-
+          # updater's semver comparison) — only the GitHub UI flag
+          # flips. See the published comment in 0.1.0-rc.5 for the
+          # full reproducer.
+          prerelease: false

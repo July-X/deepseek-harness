@@ -103,8 +103,8 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
 - 频繁轮询的路径不要拉起子进程：`get_status` 每 2.5s 一次，`node::resolve` 的结果按 `node_path` 缓存进 `AppState.node_cache`；新增轮询字段先确认它是纯文件/网络读取。
 - Tauri 非 async 命令跑在主线程：凡涉及进程 spawn、网络请求或目录树的命令（启动/停止内核、装删版本、拉 releases、插件操作）必须 `async` + `tauri::async_runtime::spawn_blocking`（模板见 `run_plugin_command`）；闭包里用 `AppHandle` 重新 `app.state::<AppState>()`，不要 move `State`。
 - 进程回收：内核子进程在 Unix 上 `setsid` 独立进程组，停止时杀整组；应用退出时兜底回收（`lib.rs` 的 `RunEvent::Exit`）。新增后台进程沿用该模式。
-- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。workflow 用 `TAURI_SIGNING_PRIVATE_KEY` secret 给更新制品签名，与 `tauri.conf.json` 钉死的 updater pubkey 配对——轮换密钥时两者必须一起换。
-- 外壳自更新走 `tauri-plugin-updater`（见 `src/updater.rs`）：启动 3 秒后后台检查并 emit `shell-update-available`，概览页显示当前版本 + 手动检查按钮；endpoint 只认已发布且标记为 latest 的 release（draft 不可见）。
+- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。workflow 用 `TAURI_SIGNING_PRIVATE_KEY` secret 给更新制品签名，与 `tauri.conf.json` 钉死的 updater pubkey 配对——轮换密钥时两者必须一起换。**`releaseDraft` 与 `prerelease` 字段都 hardcode 为 `false`**——GitHub 的 `/releases/latest` API 在最新 release 是 prerelease 时返回 404，会让 tauri.conf.json 里那个 endpoint 永远拿不到 latest.json；版本字符串本身仍然保留 `-rc.X` 后缀，所以 Semver 的 prerelease 排序在 tauri-plugin-updater 内部仍然正常工作。
+- 外壳自更新走 `tauri-plugin-updater`（见 `src/updater.rs`）：启动 3 秒后后台检查并 emit `shell-update-available`，概览页显示当前版本 + 手动检查按钮；endpoint 解析 `/releases/latest/download/latest.json`，所以发布版本必须不是 draft、不是 prerelease，否则 updater 拿到 404 时 `updater::check()` 把 `ReleaseNotFound` 当 empty state 处理（UI 显示"已是最新"），看起来像是"没有更新"，实际是 endpoint 路径错了。
 
 ## 已知坑
 
