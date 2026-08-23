@@ -209,7 +209,26 @@ function renderCatalog() {
 function loadCatalog(manual) {
   catalogLoaded = false;
   renderCatalog();
-  if (manual) setBusy(true);
+  // The catalog fetch is a pure network read — it does not mutate any
+  // shared state, hold the kernel, or take a lock the rest of the UI
+  // needs. Guard only the refresh button itself so a double-click does
+  // not queue two `plugin_catalog` invokes back-to-back; leave every
+  // other control (sidebar, kernel toggle, installed-plugin actions,
+  // catalog search / sort / filter / pagination) interactive so the
+  // user can keep working while the fetch is in flight. The previous
+  // `setBusy(true)` here disabled the entire shell, and the
+  // catalog-render pass that follows destroyed+recreated catalog
+  // buttons whose `disabled` state lived in the `busyButtons` Set
+  // managed by setBusy — the recreation left the new buttons in the
+  // Set's bookkeeping for the next `setBusy(false)` to re-enable, but
+  // the round trip was fragile (any other setBusy(true)/(false) in
+  // between could strand a button permanently disabled).
+  const reload = $('btnCatalogReload');
+  const more = $('btnCatalogMore');
+  if (manual) {
+    reload.disabled = true;
+    if (more) more.disabled = true;
+  }
   return invoke('plugin_catalog', { force: !!manual })
     .then((items) => {
       catalogItems = items || [];
@@ -224,7 +243,10 @@ function loadCatalog(manual) {
       toast('目录加载失败：' + e, 6000);
     })
     .finally(() => {
-      if (manual) setBusy(false);
+      if (manual) {
+        reload.disabled = false;
+        if (more) more.disabled = items && items.length > catalogShown ? false : true;
+      }
     });
 }
 
