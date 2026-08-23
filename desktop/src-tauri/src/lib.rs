@@ -49,6 +49,19 @@ pub fn run() {
             // setup time.
             plugins::reconcile_store(&app.state::<AppState>().data_dir);
             updater::spawn_background_check(app.handle());
+            // Auto-open DevTools on the management window in debug builds.
+            // Tauri's webview keyboard shortcuts (`Cmd+Option+I`,
+            // `Cmd+Shift+I`, F12) do not always reach WKWebView on macOS,
+            // so the inspection surface has to be opened from the
+            // embedding side. `setup` fires after the configured windows
+            // are created, so the `main` webview is already retrievable
+            // here; the gated `#[cfg(debug_assertions)]` keeps release
+            // builds (which ship `with_devtools(false)` anyway) free of
+            // the call.
+            #[cfg(debug_assertions)]
+            if let Some(window) = app.get_webview_window("main") {
+                window.open_devtools();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

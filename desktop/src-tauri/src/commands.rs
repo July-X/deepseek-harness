@@ -387,6 +387,17 @@ pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
 /// documented exception: it may not grey the button out for windows that
 /// are already visible, so on Linux this is a behavioural hint rather than
 /// a hard guarantee.
+/// Open the dsh web workbench window. The native titlebar stays as
+/// the standard macOS / Windows / Linux chrome rather than Overlay so
+/// that the OS-level drag / resize / double-click-zoom continue to work
+/// reliably (the WKWebView drag-region path through `start_dragging` IPC
+/// is flaky under Tauri 2.11.5). The chrome-row pulse is owned by the
+/// shell rather than the kernel's `packages/client/web/src/base.css`,
+/// injected via `initialization_script(titlebar-pulse.js)`; the script
+/// appends a `<style>` node with `!important` rules so the shell
+/// override wins regardless of which kernel version is running and
+/// regardless of load order between this script and the workbench's
+/// own stylesheets.
 #[tauri::command]
 pub fn open_harness(app: AppHandle) -> Result<(), String> {
     let data_dir = crate::kernel::data_dir(&app);
@@ -411,6 +422,7 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
                 .title("DeepSeek Harness 工作台")
                 .inner_size(1280.0, 840.0)
                 .closable(false)
+                .initialization_script(include_str!("titlebar-pulse.js"))
                 .build();
             if let Err(e) = result {
                 eprintln!("dsh-desktop: failed to open harness window: {e}");
