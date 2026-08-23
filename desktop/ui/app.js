@@ -611,6 +611,7 @@ function renderLogTabs(files, selectedName) {
     empty.className = 'log-tab-size';
     empty.textContent = '（暂无日志文件）';
     strip.appendChild(empty);
+    updateLogTabArrows();
     return;
   }
   files.forEach((f) => {
@@ -633,6 +634,40 @@ function renderLogTabs(files, selectedName) {
     btn.addEventListener('click', () => switchLogTab(f.name));
     strip.appendChild(btn);
   });
+  // Scroll the freshly-painted strip so the active tab is in view; a fresh
+  // render may have placed it off-screen on the right (or, after rotation,
+  // off-screen on the left).
+  scrollActiveLogTabIntoView();
+  updateLogTabArrows();
+}
+
+// Nudge the tab strip horizontally so the active tab is fully visible.
+// Called after render and after a tab switch.
+function scrollActiveLogTabIntoView() {
+  const strip = $('logTabs');
+  if (!strip) return;
+  const active = strip.querySelector('.log-tab[aria-selected="true"]');
+  if (!active) return;
+  const stripRect = strip.getBoundingClientRect();
+  const tabRect = active.getBoundingClientRect();
+  if (tabRect.left < stripRect.left) {
+    strip.scrollBy({ left: tabRect.left - stripRect.left - 8, behavior: 'smooth' });
+  } else if (tabRect.right > stripRect.right) {
+    strip.scrollBy({ left: tabRect.right - stripRect.right + 8, behavior: 'smooth' });
+  }
+}
+
+// Disable the prev/next arrow buttons when the strip cannot scroll in that
+// direction. The 1-pixel slack absorbs sub-pixel rounding from fractional
+// scroll positions.
+function updateLogTabArrows() {
+  const strip = $('logTabs');
+  const prev = $('btnLogTabsPrev');
+  const next = $('btnLogTabsNext');
+  if (!strip || !prev || !next) return;
+  const max = strip.scrollWidth - strip.clientWidth;
+  prev.disabled = strip.scrollLeft <= 1;
+  next.disabled = strip.scrollLeft >= max - 1;
 }
 
 function selectLogTab(name) {
@@ -667,7 +702,18 @@ function switchLogTab(name) {
   }
   activeLogName = name;
   selectLogTab(name);
+  scrollActiveLogTabIntoView();
+  updateLogTabArrows();
   loadActiveLog();
+}
+
+// One notch of horizontal scroll for the prev/next arrow buttons. The
+// 120-px step is roughly half the visible strip on a 480-px window, which
+// keeps adjacent tabs visible after each click so the user has context.
+function nudgeLogTabs(delta) {
+  const strip = $('logTabs');
+  if (!strip) return;
+  strip.scrollBy({ left: delta, behavior: 'smooth' });
 }
 
 function refreshLogTabs() {
@@ -747,6 +793,9 @@ $('btnOpenWindow').addEventListener('click', openHarnessWindow);
 $('btnLogs').addEventListener('click', showLogs);
 $('btnLogClose').addEventListener('click', hideLogs);
 $('btnLogRefresh').addEventListener('click', () => loadActiveLog());
+$('btnLogTabsPrev').addEventListener('click', () => nudgeLogTabs(-120));
+$('btnLogTabsNext').addEventListener('click', () => nudgeLogTabs(120));
+$('logTabs').addEventListener('scroll', updateLogTabArrows, { passive: true });
 $('btnConfirmOk').addEventListener('click', () => settleConfirm(true));
 $('btnConfirmCancel').addEventListener('click', () => settleConfirm(false));
 $('btnDetectNode').addEventListener('click', detectNode);

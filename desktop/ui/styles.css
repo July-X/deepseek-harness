@@ -323,27 +323,33 @@ main {
 /* All scrollable containers share the same narrow scrollbar style.
    WKWebView overlay scrollbar width is controlled by macOS system settings;
    adding -webkit-appearance:none forces the webkit painted scrollbar, which
-   responds to the width below. */
+   responds to the width below. Width is 6px everywhere so the logs modal
+   pre, plugin list, release list and main pane look uniform. */
 html::-webkit-scrollbar,
 body::-webkit-scrollbar,
 main::-webkit-scrollbar,
+pre::-webkit-scrollbar,
 .list-group .release-list::-webkit-scrollbar,
 .list-group .installed-list::-webkit-scrollbar,
 #pluginList::-webkit-scrollbar,
-.install-log::-webkit-scrollbar {
+.install-log::-webkit-scrollbar,
+.log-tabs::-webkit-scrollbar {
   -webkit-appearance: none;
   appearance: none;
   width: 6px;
+  height: 6px;
   scrollbar-width: thin;
 }
 
 html::-webkit-scrollbar-thumb,
 body::-webkit-scrollbar-thumb,
 main::-webkit-scrollbar-thumb,
+pre::-webkit-scrollbar-thumb,
 .list-group .release-list::-webkit-scrollbar-thumb,
 .list-group .installed-list::-webkit-scrollbar-thumb,
 #pluginList::-webkit-scrollbar-thumb,
-.install-log::-webkit-scrollbar-thumb {
+.install-log::-webkit-scrollbar-thumb,
+.log-tabs::-webkit-scrollbar-thumb {
   -webkit-appearance: none;
   appearance: none;
   background: rgba(255, 255, 255, 0.18);
@@ -903,10 +909,21 @@ button.danger.armed {
 /* Logs panel sits at the top of the window instead of the vertical center,
    so the user sees the live output close to where they're reading the
    overview. The body remains anchored to the top edge with a fixed height;
-   the centered modal default still applies to dialogs (confirm, install). */
+   the centered modal default still applies to dialogs (confirm, install).
+
+   `pointer-events: none` on the wrapper lets clicks pass through the empty
+   space below the panel back to the underlying UI; the modal-body restores
+   `pointer-events: auto` so its own buttons still receive clicks.
+
+   `backdrop-filter: blur(...)` blurs whatever the panel doesn't cover — the
+   lower portion of the main UI is fully visible below the 60vh body and
+   would otherwise look stark against the dark panel above it. WKWebView
+   needs the `-webkit-` prefix. */
 .modal-top {
   display: block;
-  background: transparent;
+  background: rgba(4, 8, 20, 0.35);
+  -webkit-backdrop-filter: blur(8px) saturate(1.2);
+  backdrop-filter: blur(8px) saturate(1.2);
   pointer-events: none;
 }
 .modal-top .modal-body {
@@ -959,17 +976,49 @@ button.danger.armed {
   word-break: break-all;
 }
 
-/* Per-file tab strip for the logs modal. Horizontally scrollable when the
-   logs directory has more tabs than fit on the 480px window; vertical
-   overflow is hidden so tabs never wrap into a second row. */
+/* Per-file tab strip for the logs modal. The wrap holds two arrow buttons
+   flanking a horizontally-scrollable tab strip; the arrows nudge the strip
+   one notch at a time instead of exposing a horizontal scrollbar. Tabs
+   stay on a single row regardless of how many log files exist. */
+.log-tabs-wrap {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+}
 .log-tabs {
+  flex: 1;
+  min-width: 0;
   display: flex;
   gap: 4px;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid var(--border);
+  padding: 8px 4px 0;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  /* Hide the strip's own scrollbar — the flanking arrow buttons drive the
+     scroll position so users don't see a horizontal scrollbar. */
+  scrollbar-width: none;
+}
+.log-tabs::-webkit-scrollbar {
+  display: none;
+}
+.log-tabs-arrow {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  cursor: pointer;
+}
+.log-tabs-arrow:hover:not(:disabled) {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.04);
+}
+.log-tabs-arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 .log-tab {
   flex: 0 0 auto;

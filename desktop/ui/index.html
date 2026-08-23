@@ -86,6 +86,12 @@
     <symbol id="i-chevron-down" viewBox="0 0 24 24">
       <polyline points="6 9 12 15 18 9" />
     </symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24">
+      <polyline points="15 6 9 12 15 18" />
+    </symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24">
+      <polyline points="9 6 15 12 9 18" />
+    </symbol>
     <symbol id="i-x" viewBox="0 0 24 24">
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
@@ -335,7 +341,15 @@
           <svg class="icon"><use href="#i-x" /></svg><span>关闭</span>
         </button>
       </div>
-      <div id="logTabs" class="log-tabs" role="tablist"></div>
+      <div class="log-tabs-wrap">
+        <button id="btnLogTabsPrev" type="button" class="log-tabs-arrow" title="向左滚动" aria-label="向左滚动">
+          <svg class="icon"><use href="#i-chevron-left" /></svg>
+        </button>
+        <div id="logTabs" class="log-tabs" role="tablist"></div>
+        <button id="btnLogTabsNext" type="button" class="log-tabs-arrow" title="向右滚动" aria-label="向右滚动">
+          <svg class="icon"><use href="#i-chevron-right" /></svg>
+        </button>
+      </div>
       <pre id="logContent"></pre>
     </div>
   </div>
