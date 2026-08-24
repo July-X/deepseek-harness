@@ -145,6 +145,29 @@
     <main>
       <!-- 概览：当前内核状态与启停操作 -->
       <section class="panel" id="panelOverview">
+        <!-- 首次启动引导：未安装任何内核时显示，比 status 卡片底部的 hint
+             更醒目，让新用户一眼看出下一步该做什么。两个按钮对应两条路径：
+             「选择并安装内核」跳到版本页并自动拉取发布列表，
+             「安装最新版本」直接拉取并安装当前最新版。 -->
+        <div id="firstRunCallout" class="callout callout-firstrun hidden" role="alert">
+          <div class="callout-icon" aria-hidden="true">
+            <svg class="icon"><use href="#i-alert" /></svg>
+          </div>
+          <div class="callout-body">
+            <h3>欢迎使用 DeepSeek Harness 桌面端</h3>
+            <p>当前尚未安装任何 dsh 内核版本。请先选择一个版本安装，再启动工作台。</p>
+            <div class="btn-row">
+              <button id="btnFirstRunPick" type="button">
+                <svg class="icon"><use href="#i-layers" /></svg>
+                <span>选择并安装内核</span>
+              </button>
+              <button id="btnFirstRunLatest" type="button" class="ghost">
+                <svg class="icon"><use href="#i-download" /></svg>
+                <span>安装最新版本</span>
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="card" id="cardStatus">
           <h2>当前内核</h2>
           <dl class="kv">

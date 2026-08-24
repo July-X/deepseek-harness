@@ -732,6 +732,57 @@ input:focus {
   margin-bottom: 12px;
 }
 
+/* First-run引导卡：未安装任何内核版本时高亮提示用户去安装。
+   比 .warning 更突出——使用强调色描边和左侧图标条，并在布局上
+   把按钮放到与说明文字同一区块，让「下一步」动作与上下文同屏可见。 */
+.callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  background: var(--card);
+  margin-bottom: 4px;
+}
+.callout-icon {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.16);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.callout-icon .icon {
+  width: 20px;
+  height: 20px;
+}
+.callout-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.callout-body h3 {
+  margin: 0 0 6px 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.callout-body p {
+  margin: 0 0 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.callout-body .btn-row {
+  margin: 0;
+}
+.callout-firstrun {
+  border-left-color: var(--accent);
+}
+
 .hidden {
   display: none !important;
 }
