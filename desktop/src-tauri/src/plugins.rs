@@ -297,11 +297,20 @@ fn plugin_log_path(data_dir: &Path, id: &str) -> PathBuf {
 
 /// Map a package/repo name to a filesystem-safe store id. Path traversal is
 /// structurally impossible afterwards: slashes become double underscores and
-/// dot / empty segments are rejected outright.
+/// dot / empty segments are rejected outright. Whitespace is also rejected
+/// because npm names and GitHub `owner/repo` strings are both single
+/// tokens — a string like `dsh plugin remove @scope/pkg` reaching this
+/// function means the caller forgot to peel a CLI invocation in
+/// `split_dsh_plugin_cli`; the store id should not silently swallow it.
 pub fn id_for_name(raw: &str) -> Result<String, AppError> {
     let name = raw.trim();
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::Plugin("插件名称为空或过长".into()));
+    }
+    if name.chars().any(|c| c.is_whitespace()) {
+        return Err(AppError::Plugin(format!(
+            "非法的插件名称 {name:?}（包含空白字符）"
+        )));
     }
     for part in name.split('/') {
         if part.is_empty() || part == "." || part == ".." {
@@ -397,6 +406,64 @@ fn write_meta(data_dir: &Path, version: &str, id: &str, meta: &KernelMeta) -> Re
 
 // --- spec parsing -----------------------------------------------------------
 
+/// Try to peel a `dsh plugin ... add <pkg>` CLI invocation out of an install
+/// spec. Returns the requested profile (if any) plus the bare package spec
+/// the rest of the parser can handle. Returns `None` for inputs that don't
+/// match the CLI shape — those fall through to the existing npm / git /
+/// owner-repo parsing.
+///
+/// The shell only accepts the manual-install form of the kernel's `dsh
+/// plugin` command: `add` and `install` (the kernel treats them as aliases).
+/// `remove` /`update` /`list` are rejected so a pasted command can't
+/// accidentally uninstall a plugin the user only meant to install. The
+/// `--profile` (or `-p`) flag is parsed but ignored: the shell always
+/// wires plugins into `DEFAULT_PROFILE` (`web`); supporting multiple
+/// profiles is tracked separately.
+///
+/// Recognised shapes:
+///
+/// ```text
+/// dsh plugin add <pkg>
+/// dsh plugin install <pkg>
+/// dsh plugin --profile web add <pkg>
+/// dsh plugin -p web install <pkg>
+/// ```
+///
+/// Trailing flags the kernel might accept (`--save-dev`, `--force`, …) are
+/// silently dropped — the shell's parser only needs the package spec.
+fn split_dsh_plugin_cli(spec: &str) -> Option<(Option<String>, String)> {
+    let s = spec.trim();
+    let after_dsh = s.strip_prefix("dsh ")?;
+    let after_plugin = after_dsh.trim_start().strip_prefix("plugin")?;
+    let args = after_plugin.trim();
+
+    let mut profile: Option<String> = None;
+    let mut package: Option<String> = None;
+    let mut iter = args.split_whitespace();
+    while let Some(arg) = iter.next() {
+        match arg {
+            "--profile" | "-p" => {
+                profile = iter.next().map(str::to_string);
+            }
+            "add" | "install" => {
+                // First positional after the verb is the package spec. We
+                // don't bother tracking trailing flags — anything after
+                // the package spec is dropped as the manual-install flow
+                // doesn't need it.
+                package = iter.next().map(str::to_string);
+                break;
+            }
+            _ => {
+                // Unknown leading flag — bail out and let the regular
+                // npm / git parser decide. This is what catches
+                // `dsh plugin something` typed by accident.
+                return None;
+            }
+        }
+    }
+    package.map(|p| (profile, p))
+}
+
 /// Split an npm spec into (name, optional pin). The last @ after the scope
 /// prefix separates the version; @scope/name@1.2.3 parses as (@scope/name,
 /// 1.2.3). Plain names pass through.
@@ -424,13 +491,24 @@ fn split_npm_spec(spec: &str) -> Result<(String, Option<String>), AppError> {
     }
 }
 
-/// Parse an install request into a PluginSpec. Accepts npm package names
-/// (with optional @version) and git URLs (https, git@, or owner/repo
-/// shorthand, with optional #tag).
+/// Parse an install request into a PluginSpec. Accepts:
+///   - the kernel's full `dsh plugin [--profile X] (add|install) <pkg>` CLI
+///     invocation (with the optional `--profile` / `-p` flag ignored — the
+///     shell always wires into the active profile);
+///   - npm package names with optional `@version` pin, including `@scope/name`;
+///   - git URLs (`https://…`, `git@…`, or `github.com/owner/name`);
+///   - bare `owner/repo` shorthand, with optional `#tag`.
 pub fn parse_spec(spec: &str) -> Result<PluginSpec, AppError> {
     let s = spec.trim().trim_end_matches('/');
     if s.is_empty() || s.len() > 500 {
         return Err(AppError::Plugin("安装地址为空或过长".into()));
+    }
+    // `dsh plugin ... add <pkg>` first: copy-pasteable from kernel docs
+    // and ChatGPT suggestions. The helper pulls the package spec out and
+    // recurses so every downstream branch (npm / git / owner-repo) keeps
+    // a single source of truth.
+    if let Some((_profile, pkg)) = split_dsh_plugin_cli(s) {
+        return parse_spec(&pkg);
     }
     if s.starts_with("git@") || s.contains("://") || s.contains("github.com/") {
         // git 来源：[url][#tag]
@@ -465,15 +543,28 @@ pub fn parse_spec(spec: &str) -> Result<PluginSpec, AppError> {
     }
     // owner/repo 简写：非 npm 样式（不含 @ 且含斜杠）按 GitHub 仓库处理
     if s.contains('/') && !s.starts_with('@') {
-        let github = format!("https://github.com/{s}.git");
-        let id = id_for_name(s)?;
+        // 同样的 #tag 切分逻辑，让 `owner/repo#v1.2.3` 这种简写也能
+        // 落到 fetch_git 的 tag 路径，而不是把 #tag 拼进 URL 然后
+        // git ls-remote 永远拿不到。
+        let (repo_path, pin) = match s.split_once('#') {
+            Some((repo, tag)) if !repo.is_empty() && !tag.is_empty() => {
+                (repo, Some(tag.to_string()))
+            }
+            _ => (s, None),
+        };
+        let github = format!("https://github.com/{repo_path}.git");
+        let id = id_for_name(repo_path)?;
         return Ok(PluginSpec {
             origin: "git".into(),
             source: github,
-            pin: None,
+            pin,
             id,
-            name: s.rsplit('/').next().unwrap_or(s).to_string(),
-            repo_url: Some(format!("https://github.com/{s}")),
+            name: repo_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(repo_path)
+                .to_string(),
+            repo_url: Some(format!("https://github.com/{repo_path}")),
         });
     }
     // npm 来源
@@ -2515,6 +2606,41 @@ mod tests {
         let unpinned = parse_spec("dsh-market@1.2.3").unwrap();
         assert_eq!(unpinned.source, "dsh-market");
         assert_eq!(unpinned.pin.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn parses_dsh_plugin_cli_form() {
+        // Full `dsh plugin --profile X add <pkg>` form, the canonical
+        // command the kernel ships — users paste it from docs / chat
+        // suggestions; the shell must accept it verbatim.
+        let spec =
+            parse_spec("dsh plugin --profile web add @linxin666/dsh-liangshen@latest").unwrap();
+        assert_eq!(spec.origin, "npm");
+        assert_eq!(spec.source, "@linxin666/dsh-liangshen");
+        assert_eq!(spec.pin.as_deref(), Some("latest"));
+
+        // No `--profile` flag: still parse the package spec.
+        let spec = parse_spec("dsh plugin add @linxin666/dsh-liangshen@latest").unwrap();
+        assert_eq!(spec.origin, "npm");
+        assert_eq!(spec.source, "@linxin666/dsh-liangshen");
+        assert_eq!(spec.pin.as_deref(), Some("latest"));
+
+        // `install` is an alias for `add` in the kernel CLI.
+        let spec = parse_spec("dsh plugin install @scope/pkg@1.2.3").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+        assert_eq!(spec.pin.as_deref(), Some("1.2.3"));
+
+        // Short `-p` flag.
+        let spec = parse_spec("dsh plugin -p web add owner/repo#v1.0.0").unwrap();
+        assert_eq!(spec.origin, "git");
+        assert_eq!(spec.source, "https://github.com/owner/repo.git");
+        assert_eq!(spec.pin.as_deref(), Some("v1.0.0"));
+
+        // `dsh plugin … remove` / `update` / `list` are not install verbs;
+        // the manual-install UI must reject them so a pasted command
+        // can't accidentally uninstall a plugin.
+        assert!(parse_spec("dsh plugin remove @scope/pkg").is_err());
+        assert!(parse_spec("dsh plugin list").is_err());
     }
 
     #[test]
