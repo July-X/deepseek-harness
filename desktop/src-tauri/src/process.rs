@@ -52,6 +52,44 @@ pub fn command_with_path<S: AsRef<OsStr>>(program: S) -> Command {
     cmd
 }
 
+/// Collect the output of a one-shot script tool (`npm config …`, …) whose
+/// executable may be a `.cmd` batch shim. CreateProcess cannot execute
+/// batch files directly on Windows, so the spawn routes through
+/// `%ComSpec% /C` there, mirroring `spawn`; elsewhere the executable runs
+/// directly. The child inherits the merged PATH with `extra_path_dirs`
+/// prepended, so the script's `#!/usr/bin/env node` resolution finds the
+/// node the caller validated even from a GUI shell with a system-only
+/// PATH.
+pub fn script_output(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    extra_path_dirs: &[&Path],
+) -> io::Result<std::process::Output> {
+    let path = merge_extra_path(crate::env::merged_path(), extra_path_dirs);
+    #[cfg(windows)]
+    {
+        let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into());
+        let mut cmd = Command::new(comspec);
+        cmd.arg("/C").arg(exe).args(args);
+        cmd.current_dir(cwd);
+        cmd.env("PATH", path);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        quiet(&mut cmd).output()
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new(exe);
+        cmd.args(args);
+        cmd.current_dir(cwd);
+        cmd.env("PATH", path);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.output()
+    }
+}
+
 /// Spawn a long-running child (`pnpm`, `npm`, …) and stream each stdout and
 /// stderr line to both `log_path` and `on_progress`, returning once the
 /// process exits.
@@ -74,6 +112,11 @@ pub fn command_with_path<S: AsRef<OsStr>>(program: S) -> Command {
 /// such file or directory` even though the parent could find both binaries
 /// to spawn them. Prepending `pnpm_exe.parent()` (and `node_dir` when the
 /// caller has it) makes the child see the same `node` the parent used.
+///
+/// The log file's parent directory is created when missing: the first
+/// install on a fresh data dir reaches this helper before anything else
+/// has created the log directory, and a bare `open` would otherwise fail
+/// with `NotFound` (Windows: `系统找不到指定的路径 (os error 3)`).
 pub fn run_with_progress(
     exe: &Path,
     args: &[&str],
@@ -82,6 +125,9 @@ pub fn run_with_progress(
     extra_path_dirs: &[&Path],
     mut on_progress: impl FnMut(&str),
 ) -> io::Result<ExitStatus> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let mut log = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -226,6 +272,42 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// First-run installs reach `run_with_progress` before anything else
+    /// has created the data dir's logs folder; the log open must create
+    /// missing parents instead of failing with NotFound (Windows: `os
+    /// error 3`), which previously surfaced as the misleading "无法运行
+    /// npm" before npm was even spawned.
+    #[test]
+    fn run_with_progress_creates_missing_log_directory() {
+        let root =
+            std::env::temp_dir().join(format!("dsh-desktop-process-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let log_path = root.join("a").join("b").join("run.log");
+        let cwd = std::env::temp_dir();
+        let status = if cfg!(windows) {
+            run_with_progress(
+                Path::new("cmd.exe"),
+                &["/C", "echo", "hi"],
+                &cwd,
+                &log_path,
+                &[],
+                |_| {},
+            )
+        } else {
+            run_with_progress(
+                Path::new("/bin/echo"),
+                &["hi"],
+                &cwd,
+                &log_path,
+                &[],
+                |_| {},
+            )
+        }
+        .expect("spawn child");
+        assert!(status.success());
+        assert!(log_path.is_file(), "log file must be created: {log_path:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
     /// Separator the helper actually uses on the host platform.
     /// `merge_extra_path` follows `cfg(windows)` (see its body), so the
     /// expected strings here track that choice instead of hard-coding a

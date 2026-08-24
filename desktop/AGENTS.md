@@ -36,7 +36,7 @@ UI 是零构建静态页面（`ui/index.html` + `app.js` + `styles.css`），改
 - 长任务失败时进度面板保持开放，由用户手动点「关闭」收起——不要在 catch 后自动隐藏。
 - 日志双轨：UI 只显示有限行数的实时流（ANSI 在前端剥离），完整原始输出始终落盘 `<data_dir>/logs/install-<version>.log` 与 `kernel.log`；报错信息引用日志路径。
 - 图标：全仓库统一双母版（`assets/whale-icon.svg` + `assets/whale-icon-small.svg`），改设计只改这两个 SVG，再跑 `scripts/build-icons.sh` 一次性再生成全套。眼睛射线必须用 `<polygon>`（不是 `<path>`）。bundle 瓦片、RGBA、再生成规则与增量构建触发见 [docs/icon-design.md](docs/icon-design.md)。
-- Windows 兼容：`.cmd` 脚本 spawn 须经 `%ComSpec% /C`（见 `run_pnpm`）；GUI 子进程必须过 `process.rs` 的 `quiet()`（CREATE_NO_WINDOW）；短生命周期工具（`git ls-remote`、`tar -xzf` 等）走 `process::command_with_path(program)`。
+- Windows 兼容：`.cmd` 脚本 spawn 须经 `%ComSpec% /C`（长任务见 `process::run_with_progress` / `run_pnpm`，一次性收集输出见 `process::script_output`）；GUI 子进程必须过 `process.rs` 的 `quiet()`（CREATE_NO_WINDOW）；检测 PATH 上的工具一律扫 `env::merged_path()`（GUI 只继承系统 PATH，用户 PATH 里的 `%AppData%\npm` 等条目要合并注册表 `HKCU\Environment\Path` 才可见）；短生命周期工具（`git ls-remote`、`tar -xzf` 等）走 `process::command_with_path(program)`。
 - 频繁轮询的路径不要拉起子进程：`get_status` 每 2.5s 一次，`node::resolve` 结果按 `node_path` 缓存进 `AppState.node_cache`；新增轮询字段先确认是纯文件/网络读取。
 - Tauri 同步命令跑在主线程：凡涉及进程 spawn、网络请求或目录树的命令（启动/停止内核、装删版本、拉 releases、插件操作）必须 `async` + `tauri::async_runtime::spawn_blocking`（模板见 `run_plugin_command`）；闭包里用 `AppHandle` 重新 `app.state::<AppState>()`，不要 move `State`。
 - 进程回收：内核子进程在 Unix 上 `setsid` 独立进程组，停止时杀整组；应用退出时兜底回收（`lib.rs` 的 `RunEvent::Exit`）。新增后台进程沿用该模式。

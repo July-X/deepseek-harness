@@ -136,10 +136,20 @@ fn which_in_dir(name: &str, dir: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// Directories to scan when looking up a tool on PATH. Detection must see
+/// the same PATH the shell stamps onto spawned children
+/// (`crate::env::merged_path`): a GUI-launched Windows shell inherits only
+/// the system PATH, so tools installed into the user-level npm prefix
+/// (`%AppData%\npm`) are invisible to a raw `std::env::var_os("PATH")`
+/// scan even though the user can run them from any terminal. On other
+/// platforms the merged PATH mirrors the process PATH.
+fn path_dirs() -> impl Iterator<Item = PathBuf> {
+    std::env::split_paths(crate::env::merged_path())
+}
+
 /// Find `node` on the PATH.
 fn from_path() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+    for dir in path_dirs() {
         let candidate = dir.join(exe_name("node"));
         if candidate.is_file() {
             return Some(candidate);
@@ -513,11 +523,9 @@ pub fn resolve_pnpm(settings: &Settings, node_dir: &Path) -> Option<PathBuf> {
     if let Some(p) = which_in_dir("pnpm", node_dir) {
         return Some(p);
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            if let Some(p) = which_in_dir("pnpm", &dir) {
-                return Some(p);
-            }
+    for dir in path_dirs() {
+        if let Some(p) = which_in_dir("pnpm", &dir) {
+            return Some(p);
         }
     }
     None
@@ -538,11 +546,9 @@ pub fn find_npm(settings: &Settings, node_dir: &Path) -> Option<PathBuf> {
     if let Some(p) = which_in_dir("npm", node_dir) {
         return Some(p);
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            if let Some(p) = which_in_dir("npm", &dir) {
-                return Some(p);
-            }
+    for dir in path_dirs() {
+        if let Some(p) = which_in_dir("npm", &dir) {
+            return Some(p);
         }
     }
     None
@@ -588,7 +594,8 @@ pub fn ensure_pnpm(
     )
     .map_err(|e| {
         format!(
-            "无法运行 npm 以自动安装 pnpm：{e}。请检查 Node.js 安装，或在「设置」中手动指定 pnpm 路径"
+            "无法运行 npm 以自动安装 pnpm：{e}。请检查 Node.js 安装，或在「设置」中手动指定 pnpm 路径。完整日志：{log}",
+            log = log_path.display()
         )
     })?;
     if !status.success() {
@@ -624,12 +631,12 @@ pub fn ensure_pnpm(
 }
 
 /// Ask npm where it would install global packages — the parent dir of the
-/// script bin we are about to look in.
+/// script bin we are about to look in. npm is a `.cmd` batch shim on
+/// Windows, so the spawn goes through `process::script_output`, which
+/// routes batch files through `%ComSpec% /C` and stamps the merged PATH.
 fn npm_prefix(npm: &Path, cwd: &Path) -> Result<PathBuf, String> {
-    let mut cmd = Command::new(npm);
-    cmd.args(["config", "get", "prefix"]).current_dir(cwd);
-    let output = quiet(&mut cmd)
-        .output()
+    let npm_dir = npm.parent().unwrap_or(std::path::Path::new("."));
+    let output = crate::process::script_output(npm, &["config", "get", "prefix"], cwd, &[npm_dir])
         .map_err(|e| format!("无法读取 npm prefix：{e}"))?;
     if !output.status.success() {
         return Err(format!(
