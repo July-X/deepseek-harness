@@ -1199,9 +1199,10 @@ button.danger.armed {
   flex: 0 0 auto;
 }
 
-/* 输入框内嵌动作按钮：把触发按钮做进输入框右内侧，让输入框独占
-   整行宽度，placeholder 不被按钮挤掉。Enter 也照样触发同样的
-   onClick（绑定在按钮 click 上）。 */
+/* 输入框右侧提示符：↵ 让用户知道「按 Enter 开始安装」，不是
+   可点击的按钮——按钮形状 + 下载 icon 会误导成「点这里」，
+   但安装入口只有 Enter。Enter 触发逻辑由 plugins.js 的 keydown
+   监听统一处理（installPlugin('')）。 */
 .input-with-action {
   position: relative;
   flex: 1 1 auto;
@@ -1213,28 +1214,17 @@ button.danger.armed {
   min-width: 0;
   padding-right: 36px;
 }
-.input-action {
+.input-hint {
   position: absolute;
-  right: 4px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  background: transparent;
-  border: 0;
-  padding: 4px 8px;
-  margin: 0;
-  cursor: pointer;
+  font-size: 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--muted);
-  border-radius: 6px;
   line-height: 0;
-}
-.input-action:hover:not(:disabled) {
-  color: var(--accent);
-  background: rgba(59, 130, 246, 0.12);
-}
-.input-action:disabled {
-  color: var(--muted);
-  opacity: 0.5;
-  cursor: not-allowed;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* 「手动安装」上方加一条与卡片内分割线同色的细线，

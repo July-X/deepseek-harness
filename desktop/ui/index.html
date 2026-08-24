@@ -270,9 +270,9 @@
           <div class="install-row">
             <div class="input-with-action">
               <input id="pluginSpec" type="text" placeholder="npm i @scope/pkg · 也支持 owner/repo、dsh add" spellcheck="false" />
-              <button id="btnPluginInstall" type="button" class="input-action" aria-label="安装">
-                <svg class="icon"><use href="#i-download" /></svg>
-              </button>
+              <!-- 视觉提示，不是可点击的按钮：↵ 让用户知道「回车开始安装」，
+                   而不要把下载 icon 误导成「点这里」。 -->
+              <span class="input-hint" aria-hidden="true" title="按 Enter 开始安装">↵</span>
             </div>
           </div>
         </div>

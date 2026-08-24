@@ -488,7 +488,6 @@ function openExternal(url) {
 
 // --- wiring ---------------------------------------------------------------
 
-$('btnPluginInstall').addEventListener('click', () => installPlugin(''));
 $('btnPluginCheck').addEventListener('click', () => checkPluginUpdates({ busy: true, toastOnUpdates: true }));
 $('btnPluginSync').addEventListener('click', syncPlugins);
 $('btnCatalogReload').addEventListener('click', () => loadCatalog(true));
