@@ -1856,9 +1856,12 @@ struct HubRaw {
     /// Description.
     #[serde(default)]
     d: String,
-    /// GitHub repo `owner/name`.
-    #[serde(default)]
-    r: String,
+    /// Repo reference. Accepts both the shorthand `"owner/repo"` and the
+    /// detailed `{ "repo": "owner/repo", "npmPackage": "pkg" }` form; an
+    /// entry with both indicates the author ships an npm distribution
+    /// alongside the source repo and the catalog should install from npm.
+    #[serde(default, deserialize_with = "deserialize_hub_repo")]
+    r: HubRepo,
     /// Verification state; `verified` means manually reviewed.
     #[serde(default)]
     v: String,
@@ -1873,12 +1876,84 @@ struct HubRaw {
     fk: u64,
 }
 
+/// Repo reference from a hub entry. Either the bare `owner/repo` shorthand
+/// or the detailed `{ repo, npmPackage }` object. Empty / missing fields
+/// resolve to `None` so downstream code never sees a placeholder string it
+/// has to filter out.
+#[derive(Debug, Default, Clone)]
+struct HubRepo {
+    repo: Option<String>,
+    npm_package: Option<String>,
+}
+
+impl HubRepo {
+    fn repo(&self) -> Option<&str> {
+        self.repo.as_deref().filter(|s| !s.is_empty())
+    }
+    fn npm_package(&self) -> Option<&str> {
+        self.npm_package.as_deref().filter(|s| !s.is_empty())
+    }
+}
+
+/// Deserialize `r` from either a JSON string or `{ repo, npmPackage }`
+/// object. Anything else (null, number, …) collapses to an empty
+/// `HubRepo`, the same shape the field takes when the JSON omits it.
+///
+/// The hub feed switched a majority of entries to the detailed form when
+/// authors started publishing npm distributions alongside the source repo.
+/// The previous `r: String` deserializer rejected those entries wholesale,
+/// so a single detailed entry caused `Vec<HubRaw>::from_str` to fail for
+/// the whole array — the catalog then silently fell back to the much
+/// smaller reference market. Accepting both shapes here is what makes
+/// hub-only plugins surface in the plugin center at all.
+fn deserialize_hub_repo<'de, D>(de: D) -> Result<HubRepo, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(de)?;
+    match value {
+        serde_json::Value::Null => Ok(HubRepo::default()),
+        serde_json::Value::String(s) => Ok(HubRepo {
+            repo: (!s.is_empty()).then_some(s),
+            npm_package: None,
+        }),
+        serde_json::Value::Object(_) => {
+            #[derive(Deserialize)]
+            struct Detail {
+                #[serde(default)]
+                repo: String,
+                #[serde(default, rename = "npmPackage")]
+                npm_package: String,
+            }
+            let d: Detail = serde_json::from_value(value).map_err(Error::custom)?;
+            Ok(HubRepo {
+                repo: (!d.repo.is_empty()).then_some(d.repo),
+                npm_package: (!d.npm_package.is_empty()).then_some(d.npm_package),
+            })
+        }
+        _ => Err(Error::custom(
+            "`r` must be a string or { repo, npmPackage } object",
+        )),
+    }
+}
+
 impl HubRaw {
-    /// Normalize a hub entry to the shared catalog item. The hub's official
-    /// install path is git (`dsh plugin add github:owner/repo`), so entries
-    /// with a repo install from git; repo-less entries fall back to npm.
+    /// Normalize a hub entry to the shared catalog item. The hub feed
+    /// distinguishes three install paths, picked here in priority order:
+    ///
+    /// 1. `npmPackage` set → install from npm (author-published package,
+    ///    no compile step; preferred when the author ships one).
+    /// 2. `repo` set → install from the GitHub repo via `git clone`.
+    /// 3. neither → install from npm using the plugin's display name as
+    ///    the package (legacy fallback for npm-only entries that never
+    ///    filled in `r`).
+    ///
+    /// The catalog UI surfaces the chosen origin on each card so the user
+    /// sees whether an 「安装」 button triggers an npm or git fetch.
     fn into_item(self) -> CatalogItem {
-        let repo = (!self.r.is_empty()).then_some(self.r.clone());
+        let repo = self.r.repo().map(str::to_string);
+        let npm_package = self.r.npm_package().map(str::to_string);
         let detail_url = if !self.o.is_empty() && !self.s.is_empty() {
             format!("https://dsh-plugin.org/zh/plugins/{}/{}", self.o, self.s)
         } else {
@@ -1886,9 +1961,12 @@ impl HubRaw {
                 .map(|r| format!("https://github.com/{r}"))
                 .unwrap_or_default()
         };
-        let (origin, spec) = match &repo {
-            Some(r) => ("git", format!("https://github.com/{r}.git")),
-            None => ("npm", self.n.clone()),
+        let (origin, spec) = if let Some(pkg) = &npm_package {
+            ("npm", pkg.clone())
+        } else if let Some(r) = &repo {
+            ("git", format!("https://github.com/{r}.git"))
+        } else {
+            ("npm", self.n.clone())
         };
         let id = if self.s.is_empty() {
             self.n.clone()
@@ -2509,6 +2587,47 @@ mod tests {
         assert_eq!(item.origin, "npm");
         assert_eq!(item.spec, "pkg");
         assert!(!item.verified);
+    }
+
+    #[test]
+    fn hub_entry_with_npm_package_installs_from_npm() {
+        // Author ships an npm distribution alongside the GitHub repo; the
+        // catalog should pick the npm path so the UI's 「安装」 button
+        // installs the published tarball (404-able on npm, unlike a git
+        // clone of an arbitrary repo).
+        let raw: HubRaw = serde_json::from_str(
+            r#"{"s":"dsh-zhipu","n":"dsh-zhipu","r":{"repo":"fineven/dsh-zhipu","npmPackage":"dsh-zhipu"}}"#,
+        )
+        .expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "npm");
+        assert_eq!(item.spec, "dsh-zhipu");
+        assert_eq!(item.repo.as_deref(), Some("fineven/dsh-zhipu"));
+    }
+
+    #[test]
+    fn hub_entry_with_repo_object_no_npm_falls_back_to_git() {
+        // A detailed `r` without `npmPackage` should still install via
+        // git; the detailed form carries the same `repo` shorthand in
+        // object clothing, so the install path is unchanged.
+        let raw: HubRaw =
+            serde_json::from_str(r#"{"s":"plug","n":"plug","r":{"repo":"owner/plug"}}"#)
+                .expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "git");
+        assert_eq!(item.spec, "https://github.com/owner/plug.git");
+    }
+
+    #[test]
+    fn hub_entry_with_empty_repo_object_falls_back_to_npm_name() {
+        // A detailed `r` with neither field filled is treated the same
+        // as a missing `r` — npm install using the display name.
+        let raw: HubRaw =
+            serde_json::from_str(r#"{"s":"plug","n":"plug","r":{}}"#).expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "npm");
+        assert_eq!(item.spec, "plug");
+        assert!(item.repo.is_none());
     }
 
     #[test]
