@@ -464,6 +464,61 @@ fn split_dsh_plugin_cli(spec: &str) -> Option<(Option<String>, String)> {
     package.map(|p| (profile, p))
 }
 
+/// Try to peel a package-manager install command out of an install spec
+/// (`npm install <pkg>`, `pnpm add <pkg>`, `yarn add <pkg>`,
+/// `bun add <pkg>` …). Returns the bare package spec, or `None` when the
+/// input does not match that shape — those fall through to the regular
+/// npm / git / owner-repo parsing.
+///
+/// Flags are silently dropped wherever they appear (before or after the
+/// verb, before or after the package spec). The shell has no concept of
+/// `--save-dev` / `--global` / `--registry` — every accepted form ends
+/// up at the same store path under `<dsh_home>/plugins/`. The only verb
+/// forms accepted are `install` / `i` / `add` (npm's `install` and `i`
+/// are aliases for the same action; `add` is the newer alias that
+/// mirrors pnpm/yarn/bun).
+///
+/// Recognised shapes (any of `npm` / `pnpm` / `yarn` / `bun` as the prefix):
+///
+/// ```text
+/// npm install <pkg>
+/// npm i @scope/pkg@1.2.3
+/// pnpm add owner/repo
+/// yarn add https://github.com/o/r.git#v1
+/// npm install --save-dev <pkg>      ← --save-dev dropped
+/// ```
+fn split_package_manager_cli(spec: &str) -> Option<String> {
+    // All four package managers share the verb vocabulary `install` /
+    // `i` / `add`; only the binary prefix differs.
+    const VERBS: &[&str] = &["install", "i", "add"];
+
+    let s = spec.trim();
+    let rest = s
+        .strip_prefix("npm ")
+        .or_else(|| s.strip_prefix("pnpm "))
+        .or_else(|| s.strip_prefix("yarn "))
+        .or_else(|| s.strip_prefix("bun "))?;
+
+    let mut saw_verb = false;
+    for token in rest.split_whitespace() {
+        if !saw_verb {
+            if VERBS.contains(&token) {
+                saw_verb = true;
+            }
+            // Anything before the verb (binary-prefix flags like
+            // `npm --silent install <pkg>`) is dropped.
+            continue;
+        }
+        // After the verb, take the first non-flag positional. Any flags
+        // before it (e.g. `npm i -D <pkg>`) are silently skipped.
+        if token.starts_with('-') {
+            continue;
+        }
+        return Some(token.to_string());
+    }
+    None
+}
+
 /// Split an npm spec into (name, optional pin). The last @ after the scope
 /// prefix separates the version; @scope/name@1.2.3 parses as (@scope/name,
 /// 1.2.3). Plain names pass through.
@@ -508,6 +563,13 @@ pub fn parse_spec(spec: &str) -> Result<PluginSpec, AppError> {
     // recurses so every downstream branch (npm / git / owner-repo) keeps
     // a single source of truth.
     if let Some((_profile, pkg)) = split_dsh_plugin_cli(s) {
+        return parse_spec(&pkg);
+    }
+    // Standard package-manager install syntax (`npm install <pkg>`,
+    // `pnpm add <pkg>`, `yarn add <pkg>`, `bun add <pkg>`). Same
+    // recursion — flags are dropped, the extracted spec goes through
+    // the same npm / git / owner-repo pipeline.
+    if let Some(pkg) = split_package_manager_cli(s) {
         return parse_spec(&pkg);
     }
     if s.starts_with("git@") || s.contains("://") || s.contains("github.com/") {
@@ -2606,6 +2668,39 @@ mod tests {
         let unpinned = parse_spec("dsh-market@1.2.3").unwrap();
         assert_eq!(unpinned.source, "dsh-market");
         assert_eq!(unpinned.pin.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn parses_package_manager_install_cli() {
+        // The exact form the user pastes from docs: `npm i @scope/pkg@v`.
+        let spec = parse_spec("npm i @linxin666/dsh-liangshen").unwrap();
+        assert_eq!(spec.origin, "npm");
+        assert_eq!(spec.source, "@linxin666/dsh-liangshen");
+        assert_eq!(spec.pin, None);
+
+        // `install` and `add` verbs, all four package-manager prefixes.
+        let spec = parse_spec("npm install @scope/pkg@1.2.3").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+        assert_eq!(spec.pin.as_deref(), Some("1.2.3"));
+        assert_eq!(parse_spec("pnpm add owner/repo").unwrap().origin, "git");
+        assert_eq!(parse_spec("yarn add owner/repo").unwrap().origin, "git");
+        assert_eq!(
+            parse_spec("bun add @scope/pkg@latest").unwrap().source,
+            "@scope/pkg"
+        );
+
+        // Flags (`--save-dev`, `-D`) before the package spec are dropped
+        // silently. `npm i -D <pkg>` and `npm install --save-dev <pkg>`
+        // both reduce to the bare package spec.
+        let spec = parse_spec("npm i -D @scope/pkg@1.0.0").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+        let spec = parse_spec("npm install --save-dev @scope/pkg@1.0.0").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+
+        // `npm install` (no package spec) falls through to npm parsing
+        // and fails loudly on whitespace, so the user sees an actionable
+        // error instead of a silent no-op.
+        assert!(parse_spec("npm install").is_err());
     }
 
     #[test]
