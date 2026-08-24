@@ -184,7 +184,10 @@ function renderStatus(view) {
     ? [node.path, node.version].filter(Boolean).join('  ')
     : '未检测到可用 Node（' + node.reason + '）');
   setText('kernelHome', kernel.data_dir);
-  setText('shellVersion', 'v' + view.shell_version);
+  setText('shellVersion', 'v' + view.shell_version + (view.dev_build ? '（dev）' : ''));
+  // Dev builds (tauri dev) wash the header column whale-eye red so the dev
+  // shell is unmistakable next to an installed release shell.
+  document.body.classList.toggle('dev-build', !!view.dev_build);
 
   setText('updateInstalled', String((kernel.installed || []).length) + ' 个');
 

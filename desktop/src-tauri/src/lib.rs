@@ -44,7 +44,11 @@ pub fn run() {
             eprintln!(
                 "dsh-desktop: data_dir = {} (build: {})",
                 data_dir.display(),
-                if cfg!(debug_assertions) { "dev" } else { "release" }
+                if cfg!(debug_assertions) {
+                    "dev"
+                } else {
+                    "release"
+                }
             );
             // Reap orphaned dsh web kernels belonging to this data dir
             // BEFORE anything manages state: a crashed/killed shell leaves
@@ -100,6 +104,7 @@ pub fn run() {
             commands::start_kernel,
             commands::stop_kernel,
             commands::open_harness,
+            commands::focus_main_shell,
             commands::plugin_status,
             commands::plugin_install,
             commands::plugin_update,
