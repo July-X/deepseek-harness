@@ -1,18 +1,17 @@
 # AGENTS.md — dsh-desktop
 
-面向在本目录工作的 agent 的约定。背景与用户文档见 [README.md](README.md)。
+桌面壳的 agent 约定。模块布局与数据流见 [docs/architecture.md](docs/architecture.md)；用户文档见 [README.md](README.md)。
 
-## 定位与边界
+## 范围
 
-- **不侵入内核代码**：`packages/`（含 `packages/client/web/`、`packages/core/` 等）是 `@deepseek-ai/dsh` 及其各分组下 npm 包的源码，由用户从 npm registry 自行安装官方版本；桌面壳**不**打包、不重发布、也不修改这些代码——任何对 `packages/` 的改动都不会随桌面壳 release 抵达用户机器。需要影响工作台窗口或内核行为的功能只能通过桌面壳自有边界（`src-tauri/` Rust 进程 + `ui/` 静态管理面板）实现；典型路径例如 `WebviewWindowBuilder::initialization_script()` 注入脚本、`kernel.rs` 子进程管理、`settings.rs` 配置落盘。如果一项改动"只能改内核"，推到对应的内核 PR 而不是合进桌面壳分支。仓库根的 [AGENTS.md](../AGENTS.md) 「dsh-desktop 范围约束」节是这条规则的简版。
-- dsh-desktop 是 DeepSeek Harness 的 Tauri v2 桌面外壳：管理面板（`ui/` 静态前端）+ Rust shell（`src-tauri/`），负责内核版本管理和启动 `dsh web`。
-- **独立交付物**：不加入仓库根的 pnpm workspace，不参与上游 lint / hygiene / release 门禁。在 `desktop/` 内安装依赖必须带 `--ignore-workspace`，否则 pnpm 会向上匹配仓库根的 `pnpm-workspace.yaml`，把整个 monorepo 装进当前命令。
-- 信任边界：仅信任官方 `deepseek-ai` 仓库与 npm 的 `@deepseek-ai` 命名空间；版本列表来自 npm registry（GitHub Releases 仅作回退）。
+- **不侵入内核代码**：`packages/`（`@deepseek-ai/dsh` 各分组）是用户从 npm registry 自行安装的源码，桌面壳**不**打包、不重发布、也不修改——改动不会随 release 抵达用户机器。需要影响工作台窗口或内核行为时只走自有边界（`src-tauri/` Rust 进程 + `ui/` 静态管理面板）：脚本/样式覆盖用 `WebviewWindowBuilder::initialization_script()`、内核生命周期在 `kernel.rs`、配置落盘在 `settings.rs`。"只能改内核"的改动推到对应内核 PR。完整边界依据见仓库根 [AGENTS.md](../AGENTS.md)「dsh-desktop 范围约束」。
+- **独立交付物**：不加入仓库根 pnpm workspace，不参与上游 lint / hygiene / release 门禁。`desktop/` 内 `pnpm install` / `npm install` 必须带 `--ignore-workspace`（`scripts/install.mjs` 自动追加并切换包管理器）。
+- **信任边界**：仅信任官方 `deepseek-ai` 仓库与 npm `@deepseek-ai` 命名空间；版本列表优先 npm registry，GitHub Releases 仅作回退。
 
 ## 命令
 
 ```sh
-npm run deps                      # 安装 @tauri-apps/cli（自动检测 pnpm，缺失时回退到 npm；带 --ignore-workspace 防向上匹配根 pnpm-workspace.yaml）
+npm run deps                      # 安装 @tauri-apps/cli（带 --ignore-workspace；缺 pnpm 时回退 npm）
 npm run dev                       # tauri dev
 npm run build                     # 本机构建（.dmg / NSIS）
 cargo check                       # 在 src-tauri/ 内：快速编译检查
@@ -20,118 +19,30 @@ cargo clippy --all-targets        # lint，零警告基线
 cargo fmt                         # rustfmt 格式化
 ```
 
-> 仍可直接跑 `pnpm install --ignore-workspace` / `npm install --ignore-workspace` —— `scripts/install.mjs` 只在不想记 `--ignore-workspace` 或包管理器切换时使用。
-
-- UI 是零构建静态页面（`ui/index.html` + `app.js` + `styles.css`），无打包步骤；改完直接生效。JS 语法可用 `node --check ui/app.js` 快速验证。
-- Rust 改动至少跑 `cargo check`；提交前跑 `cargo clippy --all-targets && cargo fmt`。
-
-## 架构速览
-
-```
-ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ kernel.rs / plugins.rs ──▶ pnpm/git/tar 子进程
-                                   │              │
-                              settings.rs    releases.rs（npm registry → GitHub 回退）
-                                   │
-              ~/.dsh/desktop/{settings.json, kernels/, logs/, active.txt} + ~/.dsh/plugins/
-```
-
-- **commands.rs**：Tauri 命令层。长任务（内核安装）用 `spawn_blocking` + `tauri::ipc::Channel` 向 UI 推进度事件。同步命令里不要创建 webview 窗口（Windows 死锁），沿用 `open_harness` 的新线程模式。
-- **kernel.rs**：内核生命周期。
-  - 安装 = 在 `<data_dir>/kernels/<version>/` 写最小 stub `package.json` 后执行 `pnpm add --prefix … --ignore-workspace --config.node-linker=hoisted --reporter=append-only @deepseek-ai/dsh@<version>`。
-  - `node-linker=hoisted` 保证 `node_modules` 扁平，内核入口固定为 `node_modules/@deepseek-ai/dsh/lib/bin.js`（`KERNEL_BIN_REL`）；改布局必须同步该常量与 `start()`。
-  - `run_pnpm` 把 stdout/stderr 各用一个 drain 线程读入 mpsc channel，安装线程逐行回调 `on_progress` 并落盘日志——不要把两个管道放在同一线程顺序读取（会因管道缓冲区满而死锁）。
-- **plugins.rs**：社区插件管理。详见下文「插件机制」一节。
-- **releases.rs**：npm registry 全量版本 + dist-tags；registry 不可达时回退 GitHub Releases API 与 Atom feed。
-- **node.rs**：Node 检测（显式配置 → PATH → nvm 管理的 Node：macOS/Linux `$NVM_DIR/versions/node/<v>/bin/node` 跟随 `alias/default` 链，Windows `%NVM_SYMLINK%` 与 `%NVM_HOME%/v*/node.exe` → 常见系统位置）、engines 校验（`^22.19 || >=24`）、pnpm/npm 解析（显式配置 → node 同目录 → PATH）；空结果文案按「完全没有 Node」与「Node 版本太老」分别给出可操作的多路径（nvm/fnm/volta 版本管理器、系统包管理器 brew/winget/apt、官方安装包）。
-- **settings.rs**：`settings.json` 平铺结构（`node_path` / `pnpm_path` / `port`），serde default 兼容缺字段。
+UI 是零构建静态页面（`ui/index.html` + `app.js` + `styles.css`），改完直接生效；可用 `node --check ui/app.js` 验证。Rust 改动至少 `cargo check`；提交前 `cargo clippy --all-targets && cargo fmt`。
 
 ## 数据目录
 
-外壳全部状态位于 `<dsh_home>/desktop/`（release build）或 `<dsh_home>/desktop-dev/`（debug build `tauri dev`），由 `kernel::data_dir` 统一解析并在启动时创建；`lib.rs` 的 `setup()` 必须通过它取目录——不要绕回 `app_data_dir()`。子结构：`kernels/<版本>/`、`logs/`、`settings.json`、`active.txt`、`kernel.pid`。
+`kernel::data_dir` 统一解析 `<dsh_home>/desktop/`（release）或 `<dsh_home>/desktop-dev/`（debug）。`lib.rs` 的 `setup()` 必须通过它取目录——不要绕回 `app_data_dir()`。debug 端口 3091，release 端口 3090（`kernel::DEFAULT_PORT`）；用户保存过的 port 优先于 `Settings::default()`。优先级与错位原因见 [docs/architecture.md](docs/architecture.md)。
 
-**为什么 dev 和 release 用不同目录**——`settings.json`（端口配置）、`active.txt`（当前激活版本）、`kernel.pid`（运行中内核的 PID）、`kernels/<版本>/`（安装的内核）、loopback 端口都是**共享资源**。一个开发者同时跑 `tauri dev` 和已装的 release shell 时，两个实例会互相争端口（`port_open` 拒绝启动）、互相 kill（任意一方点"关闭工作台"就把对方的内核杀了）、互相覆盖 `active.txt` 和 `settings.json`。分目录 + 错位端口（debug 3091 / release 3090）让两边完全互不读对方的 state——dev 可以放心改端口、切内核、看 log，不会污染 release shell 的视图。
+## 插件实现
 
-启动时 `setup()` 会在 stderr 打印 `dsh-desktop: data_dir = <path> (build: dev|release)`，让用户一眼确认当前进程用的是哪个目录。
-
-**优先级**（`kernel::data_dir` 解析顺序）：
-
-1. `DSH_DESKTOP_DATA_DIR` 环境变量——完全覆盖目录路径（用于在外部盘上测试等场景）
-2. `<DSH_HOME 或 ~/.dsh>/<SHELL_SUBDIR>/`——`SHELL_SUBDIR` 在 release 是 `desktop`、debug 是 `desktop-dev`
-3. `app_data_dir()`（OS app-data 目录）作为只读 dsh home 的 fallback
-
-**端口**（`kernel::DEFAULT_PORT`）：
-
-- debug build：3091（release 默认 3090 + 1）
-- release build：3090
-
-`Settings::default()` 的 port 在 settings.json 缺失时用 `kernel::DEFAULT_PORT`；用户保存过的 port 优先。
-
-## 插件机制
-
-**布局**：
-
-```
-~/.dsh/
-├── plugins/<id>/            # 中央 store：git clone 或 npm 提取
-│   ├── package.json
-│   ├── lib/                 # TS 插件的 build 产物（pnpm install 时 prepare 触发）
-│   ├── node_modules/        # store 自身的依赖
-│   ├── pnpm-lock.yaml
-│   └── .npmrc               # 由 ensure_store_npmrc 写入（minimumReleaseAge=0）
-├── profiles/<name>/         # dsh profile（声明 bundle 列表 + 插件 link 依赖）
-│   ├── package.json         # {"dependencies":{"dsh-synapse":"link:../../desktop/..."}}
-│   ├── node_modules/<id> → ../../../desktop/.../<id>
-│   └── pnpm-workspace.yaml  # nodeLinker: hoisted, autoInstallPeers: false, minimumReleaseAge=0
-└── desktop/kernels/<version>/plugins/<id> → ~/.dsh/plugins/<id>  # materialize_one 写入
-                                               .meta/<id>.json      # mode + version + synced_at
-```
-
-**完整流程**（以 `install(spec)` 为例）：
-
-1. **fetch**：git clone（深度 1）或 npm tarball 解压到 `~/.dsh/plugins/<id>/`
-2. **ensure_store_npmrc**：写入 `~/.dsh/plugins/.npmrc`（`minimumReleaseAge=0`、固定 npm registry）—— pnpm v11 的 `minimumReleaseAgeExclude` 不支持通配符，必须直接关掉年龄检查
-3. **install_store_deps**：`pnpm install --ignore-workspace --config.node-linker=hoisted --reporter=append-only`
-   - 装依赖链 → 若有 `prepare` 脚本（`tsdown` / `tsc`）→ 触发构建 → `lib/` 就位
-   - 装前**先删旧 `pnpm-lock.yaml`**：避开历史 lockfile 的 `minimumReleaseAge` 失效条目
-4. **upsert_item**：写入 `~/.dsh/plugins/store.json`
-5. **sync_kernels**：每个已装内核调用 `materialize_one`：
-   - 解析 `resolved_source`（store 若本身是 symlink，展开到真实路径）
-   - 校验现有 `target` symlink 是否等于 `resolved_source`——不等就重建（修复历史 double-symlink 链）
-   - 调 `refresh_store_peers`：把内核 `node_modules/@deepseek-ai/*` 链接进 store 的 peer deps 解析路径
-6. **ensure_wiring**：写 profile 的 `package.json` + `pnpm install` 把 `link:` 依赖铺到 `profiles/<name>/node_modules/`
-
-**常见坑**：
-
-| 现象 | 根因 | 修复 |
-| --- | --- | --- |
-| `minimumReleaseAgeExclude` 通配符不生效 | pnpm 不支持通配符，必须 `package@version` 全列 | 改用 `minimumReleaseAge=0` |
-| `Cannot find module .../lib/index.js`（TS 插件） | `pnpm install` 没触发 `prepare` 构建 | 修好 `.npmrc` + 删除旧 lockfile 后重装 |
-| 内核 `node_modules/<id>` 看着对但解析失败 | store 若本身是 symlink，套一层形成 double-symlink | `materialize_one` `read_link` store，链上一个跳转 |
-| 重启后 `pnpm install` 报 `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION` | 旧 lockfile 过期条目 | `install_store_deps` 先删 lockfile 再 re-resolve |
+`plugins.rs` 的 pnpm 标志（`--ignore-workspace --config.node-linker=hoisted --reporter=append-only`）、`.npmrc` 关闭 `minimumReleaseAge`、装前删旧 lockfile、`materialize_one` 经 `read_link` 修复双层 symlink 等实现规则见 [docs/plugin-internals.md](docs/plugin-internals.md)；设计层（用户可见的目录布局、双模式、接线、目录浏览）见 [docs/plugin-management.md](docs/plugin-management.md)。
 
 ## 约定
 
-- 用户可见文案用简体中文；错误信息必须包含可操作的下一步（如缺失依赖时给出安装指引）与相关日志路径。
-- 工作台 UX：内核是实现细节，概览页只暴露「启动工作台 / 关闭工作台」单按钮状态机（启动 = 拉起内核 + 轮询等待就绪 + 自动打开窗口；失败自动弹出内核日志）；「打开工作台窗口」「查看日志」是次级 ghost 入口。新增用户可见操作时不要把内核生命周期拆成独立按钮。
-- 长任务失败时进度面板保持打开并展示错误与日志区，用户手动点击「关闭」才收起——不要在 catch 后自动隐藏面板。
-- 日志双轨：UI 只显示有限行数的实时流（ANSI 转义在前端剥离）；完整原始输出始终落盘 `<data_dir>/logs/install-<version>.log` 与 `kernel.log`。报错信息引用日志路径。
-- 图标全仓库统一双母版：`assets/whale-icon.svg`（≥128px，完整红眼细节）与 `assets/whale-icon-small.svg`（≤64px、favicon 及 `ui/whale-icon.png`——面板顶栏只按 60 CSS px 显示；小尺寸下细节是亚像素，必须简化）。改设计只改这两个 SVG，然后跑 `scripts/build-icons.sh`（需 rsvg-convert + ImageMagick + macOS iconutil）一次性再生成：`src-tauri/icons` 全套（按尺寸选母版合成 ico/icns）、`assets/whale-icon-512.png`、`ui/whale-icon.png`（小母版渲染 128px）、`website/public/favicon.svg`（品牌蓝鲸身）与 `apps/web/public/favicon.svg`（深色模式转白，pwa-manifest.e2e.ts 锁定该行为）。不要再用 `tauri icon` 单母版再生成——它会把小尺寸帧覆盖回细节版。眼睛射线必须用 `<polygon>` 而非 `<path>`，否则 apps/web 深色模式的 `path { fill: #fff }` 会把它漂白。`src-tauri/icons` 只提交被 `tauri.conf.json` 引用的文件（icon.icns/icon.ico/32x32/128x128/128x128@2x）。改图标后重启应用，Dock 图标缓存才会刷新。
-  - **改了图标但 dev exe 没 rebuild 的话，任务栏还是老图标**：`tauri-build` 通过 `tauri-winres` → `embed-resource` 把 `icons/icon.ico` 编进 Windows dev exe，但**没有发 `cargo:rerun-if-changed=` 声明**，cargo 的增量构建只看 Rust 源码变化。所以重写 `icon.ico` 之后，光 `pnpm run dev` / `cargo build` 不会触发 rebuild，exe 里嵌入的还是上一次 build 时的图标——磁盘上 PNG 是新的，任务栏却显示旧的。`build.rs` 已经在调用 `tauri_build::build()` 之前显式声明了 6 个 `rerun-if-changed`（`icon.ico` / `icon.icns` / `icon.png` / `32x32.png` / `128x128.png` / `128x128@2x.png`），任何其中一个变化都强制 rerun build script → 重新生成 `.rc` → 重新 link。运行中的 dev exe 锁住文件的话，Tauri dev 会先关掉再重启；如果不是 dev 模式就 `Stop-Process` 一下 `dsh-desktop` 再 build。macOS Dock 那边是缓存问题，杀掉 Dock / 重启应用就刷新；Windows taskbar 缓存比 macOS 更粘，可能要重启 Explorer（`ie4uinit.exe -show` 或任务管理器重启 explorer.exe）才能让任务栏读出新图标。
-  - **桌面 bundle 图标是白色圆角瓦片（≈80% 画布）+ 全透明边距，瓦片不能铺满画布、角落不能压白、也不能没有瓦片**：macOS Dock 不给图标加任何背景或蒙版（圆角是 artwork 自带的约定），且按 Apple 图标网格，可见圆角矩形只占画布的 824/1024、四周留透明边距。所以 `build-icons.sh` 在渲染 desktop bundle（`icon.icns` / `icon.ico` / `icon.png` / `32x32.png` / `128x128.png` / `128x128@2x.png` / `assets/whale-icon-512.png`）时，先在透明画布中央画一个 824/1024 大小的白色圆角矩形（圆角 = 画布的 18% ≈ 瓦片的 22.4%，Big Sur squircle 比例），再把鲸鱼缩到瓦片的 75%（≈画布的 60%）居中叠上。三个反面教材：瓦片铺满画布 → 视觉上比其他 Dock 图标大一圈；角落压成白色 → 读作硬白方块；没有瓦片全透明 → 只剩黑色鲸鱼剪影。输出必须保持 RGBA（`png:color-type=6`；`tauri::generate_context!` 编译期拒绝 RGB 图）。`ui/whale-icon.png` 和 `website` / `apps/web` 的 SVG favicon 不参与这步——它们继续全透明，分别叠在深色面板顶栏和网页背景上。再生成只能走 macOS 上的 `build-icons.sh`（rsvg-convert + ImageMagick + iconutil，release runner 即 macOS）；仓库不保留 Windows 再生成脚本——提交在仓库里的 PNG 已是套板成品，从它们二次合成会得到双重缩小的错误结果。
-- Windows 兼容：`.cmd` 脚本不能直接 spawn，须经 `%ComSpec% /C`（见 `run_pnpm`）；新增子进程调用保持同样分支。GUI 子系统下每个 `Command` 都必须过 `process.rs` 的 `quiet()`（CREATE_NO_WINDOW），否则用户会看到终端窗口频闪。直接调起短生命周期外部工具（`git ls-remote`、`tar -xzf` 等）改走 `process::command_with_path(program)`——它是 `process::spawn` 的一次性 sibling，自动盖上 `env::merged_path()`，让 GUI shell 的子进程能找到用户 PATH 里的工具（Git for Windows 等）。`Command::new` 在 shell 里只能出现在 `process.rs` 内部；其他模块需要构造子进程，先看 `command_with_path` 是否合适，再考虑 `run_with_progress`。
-- 频繁轮询的路径不要拉起子进程：`get_status` 每 2.5s 一次，`node::resolve` 的结果按 `node_path` 缓存进 `AppState.node_cache`；新增轮询字段先确认它是纯文件/网络读取。
-- Tauri 非 async 命令跑在主线程：凡涉及进程 spawn、网络请求或目录树的命令（启动/停止内核、装删版本、拉 releases、插件操作）必须 `async` + `tauri::async_runtime::spawn_blocking`（模板见 `run_plugin_command`）；闭包里用 `AppHandle` 重新 `app.state::<AppState>()`，不要 move `State`。
+- 用户可见文案用简体中文；错误信息必须包含可操作的下一步与相关日志路径。
+- 工作台 UX：内核是实现细节，概览页只暴露「启动工作台 / 关闭工作台」单按钮状态机（启动 = 拉起内核 + 轮询等待就绪 + 自动打开窗口；失败自动弹出内核日志）；「打开工作台窗口」「查看日志」是次级 ghost 入口。不要把内核生命周期拆成独立按钮。
+- 长任务失败时进度面板保持开放，由用户手动点「关闭」收起——不要在 catch 后自动隐藏。
+- 日志双轨：UI 只显示有限行数的实时流（ANSI 在前端剥离），完整原始输出始终落盘 `<data_dir>/logs/install-<version>.log` 与 `kernel.log`；报错信息引用日志路径。
+- 图标：全仓库统一双母版（`assets/whale-icon.svg` + `assets/whale-icon-small.svg`），改设计只改这两个 SVG，再跑 `scripts/build-icons.sh` 一次性再生成全套。眼睛射线必须用 `<polygon>`（不是 `<path>`）。bundle 瓦片、RGBA、再生成规则与增量构建触发见 [docs/icon-design.md](docs/icon-design.md)。
+- Windows 兼容：`.cmd` 脚本 spawn 须经 `%ComSpec% /C`（见 `run_pnpm`）；GUI 子进程必须过 `process.rs` 的 `quiet()`（CREATE_NO_WINDOW）；短生命周期工具（`git ls-remote`、`tar -xzf` 等）走 `process::command_with_path(program)`。
+- 频繁轮询的路径不要拉起子进程：`get_status` 每 2.5s 一次，`node::resolve` 结果按 `node_path` 缓存进 `AppState.node_cache`；新增轮询字段先确认是纯文件/网络读取。
+- Tauri 同步命令跑在主线程：凡涉及进程 spawn、网络请求或目录树的命令（启动/停止内核、装删版本、拉 releases、插件操作）必须 `async` + `tauri::async_runtime::spawn_blocking`（模板见 `run_plugin_command`）；闭包里用 `AppHandle` 重新 `app.state::<AppState>()`，不要 move `State`。
 - 进程回收：内核子进程在 Unix 上 `setsid` 独立进程组，停止时杀整组；应用退出时兜底回收（`lib.rs` 的 `RunEvent::Exit`）。新增后台进程沿用该模式。
-- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。workflow 用 `TAURI_SIGNING_PRIVATE_KEY` secret 给更新制品签名，与 `tauri.conf.json` 钉死的 updater pubkey 配对——轮换密钥时两者必须一起换。**`releaseDraft` 与 `prerelease` 字段都 hardcode 为 `false`**——GitHub 的 `/releases/latest` API 在最新 release 是 prerelease 时返回 404，会让 tauri.conf.json 里那个 endpoint 永远拿不到 latest.json；版本字符串本身仍然保留 `-rc.X` 后缀，所以 Semver 的 prerelease 排序在 tauri-plugin-updater 内部仍然正常工作。
-- 外壳自更新走 `tauri-plugin-updater`（见 `src/updater.rs`）：启动 3 秒后后台检查并 emit `shell-update-available`，概览页显示当前版本 + 手动检查按钮；endpoint 解析 `/releases/latest/download/latest.json`，所以发布版本必须不是 draft、不是 prerelease，否则 updater 拿到 404 时 `updater::check()` 把 `ReleaseNotFound` 当 empty state 处理（UI 显示"已是最新"），看起来像是"没有更新"，实际是 endpoint 路径错了。
+- 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。workflow 用 `TAURI_SIGNING_PRIVATE_KEY` secret 给更新制品签名，与 `tauri.conf.json` 钉死的 updater pubkey 配对——轮换密钥时两者必须一起换。**`releaseDraft` 与 `prerelease` 字段都 hardcode 为 `false`**。
+- 外壳自更新走 `tauri-plugin-updater`（见 `src/updater.rs`）：endpoint 解析 `/releases/latest/download/latest.json`，所以发布版本必须不是 draft、不是 prerelease，否则 updater 拿到 404 时 `updater::check()` 把 `ReleaseNotFound` 当 empty state 处理（UI 显示"已是最新"），看起来像是"没有更新"，实际是 endpoint 路径错了。
 
 ## 已知坑
 
-| 症状 | 处理 |
-| --- | --- |
-| `pnpm install` 在 desktop/ 内装出整个 monorepo | 忘了 `--ignore-workspace` |
-| GUI 启动（Finder/开始菜单）下检测不到 nvm 的 Node，内核安装报「未检测到 Node.js」 | GUI 进程继承的 launchd / Window-Station PATH 不含 `~/.nvm/versions/node/*/bin` 或 `%NVM_HOME%\v*` | `node.rs` 直接扫描 nvm 根并按 default 别名解析 + 版本降序探测；仍失败时在「设置」手动指定 node 路径 |
-| 目标机器完全没有 Node（nvm 没装 / 装了但未 install / 系统未装） | `node.rs` 没有任何候选可探测 | 空结果文案分别给出三类安装路径：① 版本管理器 nvm/fnm/volta；② 系统包管理器 brew/winget/apt；③ 官方安装包；并附「设置」手动路径兜底 |
-| Tauri 同步命令里创建 webview 卡死 | 用新线程创建（`open_harness` 模式） |
-| macOS 访问 `127.0.0.1:3080` 失败 | WKWebView 默认允许环回，勿加 `NSAppTransportSecurity` 例外 |
-| 编辑器报 `capabilities/default.json` 缺 `$schema` | schema 由首次 `tauri build` 生成，属正常 |
+速查表见 [docs/troubleshooting.md](docs/troubleshooting.md)。
