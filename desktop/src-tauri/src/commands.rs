@@ -17,7 +17,7 @@ use tauri::{WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
 use crate::error::AppError;
-use crate::{kernel, node, plugins, releases, settings, updater};
+use crate::{kernel, node, plugins, releases, settings, skills, updater};
 
 /// Shared shell state installed as a Tauri managed state.
 pub struct AppState {
@@ -204,10 +204,7 @@ pub fn read_log_file(state: State<'_, AppState>, name: String) -> Result<String,
 /// Finder with the directory selected in its parent, `cmd /C start ""` on
 /// Windows opens File Explorer on the directory itself.
 #[tauri::command]
-pub async fn open_data_dir(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn open_data_dir(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     let path = state.data_dir.clone();
     app.opener()
@@ -676,6 +673,101 @@ pub async fn plugin_catalog(
 ) -> Result<Vec<plugins::CatalogItem>, String> {
     let data_dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || plugins::catalog(&data_dir, force))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+// --- skills -----------------------------------------------------------------
+
+/// Snapshot of the skill store and per-skill active-root state.
+#[tauri::command]
+pub async fn skill_status() -> Result<skills::SkillStatus, String> {
+    tauri::async_runtime::spawn_blocking(skills::status)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Shared body of the skill-store commands: run the `skills::` operation on
+/// a blocking worker with progress forwarded over the channel. Skills need
+/// no pnpm/profile wiring, so this stays leaner than `run_plugin_command`.
+async fn run_skill_command(
+    on_event: Channel<String>,
+    op: impl FnOnce(&mut dyn FnMut(&str)) -> Result<(), AppError> + Send + 'static,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut progress = |msg: &str| {
+            let _ = on_event.send(msg.to_string());
+        };
+        op(&mut progress).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Install a skill package (npm spec, git URL, or local folder path) into
+/// the central store and materialize its skills into the kernel skill root.
+/// The running workbench picks the change up live through the kernel watcher.
+#[tauri::command]
+pub async fn skill_install(
+    spec: String,
+    mode: String,
+    on_event: Channel<String>,
+) -> Result<(), String> {
+    run_skill_command(on_event, move |progress| {
+        skills::install(&spec, &mode, progress).map(|_| ())
+    })
+    .await
+}
+
+/// Fetch the latest version of one installed skill package and reconcile
+/// its skills in the active root.
+#[tauri::command]
+pub async fn skill_update(id: String, on_event: Channel<String>) -> Result<(), String> {
+    run_skill_command(on_event, move |progress| {
+        skills::update(&id, progress).map(|_| ())
+    })
+    .await
+}
+
+/// Uninstall a skill package everywhere (active root entries + store tree).
+#[tauri::command]
+pub async fn skill_uninstall(id: String, on_event: Channel<String>) -> Result<(), String> {
+    run_skill_command(on_event, move |progress| skills::uninstall(&id, progress)).await
+}
+
+/// Enable or disable one skill of one package (link/unlink in the root).
+#[tauri::command]
+pub async fn skill_set_enabled(
+    id: String,
+    name: String,
+    enabled: bool,
+    on_event: Channel<String>,
+) -> Result<(), String> {
+    run_skill_command(on_event, move |progress| {
+        skills::set_enabled(&id, &name, enabled, progress)
+    })
+    .await
+}
+
+/// Check every installed skill package against its origin for newer versions.
+#[tauri::command]
+pub async fn skill_check_updates() -> Result<Vec<skills::SkillUpdateInfo>, String> {
+    tauri::async_runtime::spawn_blocking(skills::check_updates)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// The full community skill catalog; search and filtering happen in the UI
+/// over this cached list. `force` bypasses the cache window (「刷新目录」).
+#[tauri::command]
+pub async fn skill_catalog(
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<Vec<skills::SkillCatalogItem>, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || skills::catalog(&data_dir, force))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())

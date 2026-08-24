@@ -144,7 +144,10 @@ fn display_short(path: &Path) -> String {
         let mut out = String::from("~");
         if !rel.as_os_str().is_empty() {
             out.push('/');
-            out.push_str(&rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"));
+            out.push_str(
+                &rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
         }
         out
     } else {
@@ -347,7 +350,7 @@ fn rotate_install_logs(logs: &Path, keep: &Path) {
     if logs.len() < KEEP {
         return;
     }
-    logs.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    logs.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
     for (_, path) in logs.iter().skip(KEEP - 1) {
         let _ = fs::remove_file(path);
     }

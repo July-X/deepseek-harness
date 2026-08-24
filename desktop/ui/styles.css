@@ -1149,6 +1149,52 @@ button.danger.armed {
   border-color: rgba(251, 191, 36, 0.35);
 }
 
+/* --- 技能管理 --- */
+
+/* One installed skill package renders as a plugin-row plus a chip list of
+   its skills; each chip carries the enable toggle for that one skill. */
+.skill-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+}
+
+.skill-chip.enabled {
+  border-color: rgba(79, 140, 255, 0.45);
+  background: rgba(79, 140, 255, 0.12);
+  color: var(--text);
+}
+
+.skill-chip .skill-chip-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.skill-chip .skill-chip-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+.skill-root-hint {
+  font-size: 11px;
+  word-break: break-all;
+}
+
 .catalog-desc {
   color: var(--muted);
   font-size: 12px;

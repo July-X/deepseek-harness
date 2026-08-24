@@ -15,6 +15,7 @@ mod process;
 mod registry;
 mod releases;
 mod settings;
+mod skills;
 mod updater;
 mod version;
 
@@ -44,7 +45,11 @@ pub fn run() {
             eprintln!(
                 "dsh-desktop: data_dir = {} (build: {})",
                 data_dir.display(),
-                if cfg!(debug_assertions) { "dev" } else { "release" }
+                if cfg!(debug_assertions) {
+                    "dev"
+                } else {
+                    "release"
+                }
             );
             // Reap orphaned dsh web kernels belonging to this data dir
             // BEFORE anything manages state: a crashed/killed shell leaves
@@ -67,6 +72,11 @@ pub fn run() {
             // plugin command touches the store, which it does not yet at
             // setup time.
             plugins::reconcile_store(&app.state::<AppState>().data_dir);
+            // Same class of startup repair for the skill store: recover
+            // staging swaps, re-link missing active-root entries, sweep
+            // orphaned store links. Pure filesystem work; failures land in
+            // the skill store's warning field for the UI.
+            skills::reconcile();
             updater::spawn_background_check(app.handle());
             // Auto-open DevTools on the management window in debug builds.
             // Tauri's webview keyboard shortcuts (`Cmd+Option+I`,
@@ -108,6 +118,13 @@ pub fn run() {
             commands::plugin_set_mode,
             commands::plugin_check_updates,
             commands::plugin_catalog,
+            commands::skill_status,
+            commands::skill_install,
+            commands::skill_update,
+            commands::skill_uninstall,
+            commands::skill_set_enabled,
+            commands::skill_check_updates,
+            commands::skill_catalog,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the dsh-desktop app");

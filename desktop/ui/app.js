@@ -381,6 +381,7 @@ async function refreshAll() {
       renderInstalled();
     })
     .then(() => (window.__dshPluginsRefresh ? window.__dshPluginsRefresh() : null))
+    .then(() => (window.__dshSkillsRefresh ? window.__dshSkillsRefresh() : null))
     .catch((e) => toast('读取状态失败：' + e, 5000));
 }
 

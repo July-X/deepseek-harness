@@ -728,8 +728,8 @@ fn fetch_into_store(
 ) -> Result<StoreItem, AppError> {
     let store = store_dir(data_dir);
     fs::create_dir_all(&store).map_err(|e| AppError::Io(e.to_string()))?;
-    let tmp = new_staging_dir(&store, TMP_PREFIX, &spec.id)
-        .map_err(|e| AppError::Io(e.to_string()))?;
+    let tmp =
+        new_staging_dir(&store, TMP_PREFIX, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
     // `tmp` is the only place we stamp the marker pre-rename. It gives
     // a leftover in-flight dir an identity for `reconcile_store` if the
     // shell crashes during fetch or validation, and the marker travels
@@ -771,14 +771,12 @@ fn fetch_into_store(
     // uninstalled plugin. If recovery itself fails, the function
     // returns the error with the staged state left on disk for
     // `reconcile_store` to repair on the next launch.
-    let new = new_staging_dir(&store, NEW_PREFIX, &spec.id)
-        .map_err(|e| AppError::Io(e.to_string()))?;
+    let new =
+        new_staging_dir(&store, NEW_PREFIX, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
     if let Err(e) = fs::rename(&tmp, &new) {
         // `tmp` still holds the validated content; leave it on disk so
         // a retry / `reconcile_store` can promote it.
-        return Err(AppError::Io(format!(
-            "将暂存目录提升到 .new-* 失败：{e}"
-        )));
+        return Err(AppError::Io(format!("将暂存目录提升到 .new-* 失败：{e}")));
     }
 
     let final_dir = store_plugin_dir(data_dir, &spec.id);
@@ -793,9 +791,7 @@ fn fetch_into_store(
             // to install this plugin.
             if fs::rename(&new, &final_dir).is_err() {
                 let _ = fs::remove_dir_all(&new);
-                return Err(AppError::Io(format!(
-                    "备份旧版本失败且无法发布新版本：{e}"
-                )));
+                return Err(AppError::Io(format!("备份旧版本失败且无法发布新版本：{e}")));
             }
             return Err(AppError::Io(format!(
                 "插件已发布，但备份旧版本失败（{e}）；下次更新若失败将无法回滚"
@@ -819,13 +815,9 @@ fn fetch_into_store(
         // next launch; if it fails, both states exist on disk for the
         // recovery scan to reconcile.
         if fs::rename(&backup, &final_dir).is_err() {
-            return Err(AppError::Io(format!(
-                "发布新版本失败且回滚旧版本失败：{e}"
-            )));
+            return Err(AppError::Io(format!("发布新版本失败且回滚旧版本失败：{e}")));
         }
-        return Err(AppError::Io(format!(
-            "发布新版本失败，已回滚到旧版本：{e}"
-        )));
+        return Err(AppError::Io(format!("发布新版本失败，已回滚到旧版本：{e}")));
     }
 
     // Synchronous cleanup of the now-redundant backup. Failure here is
@@ -1155,9 +1147,15 @@ fn build_git_plugin(
     // directory; without it the prepare step exits 127 with
     // `env: node: No such file or directory`.
     let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
-    let status =
-        kernel::run_pnpm(pnpm_exe, &args, dest, &log_path, &[pnpm_dir], &mut *on_progress)
-            .map_err(kernel::pnpm_spawn_err)?;
+    let status = kernel::run_pnpm(
+        pnpm_exe,
+        &args,
+        dest,
+        &log_path,
+        &[pnpm_dir],
+        &mut *on_progress,
+    )
+    .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() {
         return Err(AppError::Plugin(format!(
             "插件构建失败（退出码 {:?}）：`prepare` 未成功生成入口。详情见 {}",
@@ -1282,9 +1280,15 @@ fn install_store_deps(
         kernel::PNPM_NO_STRICT_DEP_BUILDS,
     ];
     let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
-    let status =
-        kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &[pnpm_dir], &mut *on_progress)
-            .map_err(kernel::pnpm_spawn_err)?;
+    let status = kernel::run_pnpm(
+        pnpm_exe,
+        &args,
+        &dir,
+        &log_path,
+        &[pnpm_dir],
+        &mut *on_progress,
+    )
+    .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() && !dir.join("node_modules").is_dir() {
         return Err(AppError::Plugin(format!(
             "插件依赖安装失败（退出码 {:?}），详情见日志：{}",
@@ -1981,7 +1985,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
 pub fn catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, AppError> {
     let mut items = fetch_catalog(data_dir, force)
         .map_err(|e| AppError::Plugin(format!("目录获取失败：{e}")))?;
-    items.sort_by(|a, b| b.stars.cmp(&a.stars));
+    items.sort_by_key(|a| std::cmp::Reverse(a.stars));
     Ok(items)
 }
 
@@ -2260,9 +2264,7 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
         let row_latest = item
             .latest_version
             .as_deref()
-            .filter(|l| {
-                is_newer_than(l, &item.installed_version, &item.origin, item.pinned)
-            })
+            .filter(|l| is_newer_than(l, &item.installed_version, &item.origin, item.pinned))
             .map(|s| s.to_string());
         rows.push(PluginRow {
             id: item.id.clone(),
@@ -2854,9 +2856,7 @@ mod tests {
 
     fn write_fake_plugin(dir: &Path, tag: &str) {
         fs::create_dir_all(dir).expect("mkdir plugin");
-        let pkg = format!(
-            r#"{{"name":"p","version":"{tag}","main":"lib/index.js"}}"#
-        );
+        let pkg = format!(r#"{{"name":"p","version":"{tag}","main":"lib/index.js"}}"#);
         fs::write(dir.join("package.json"), pkg).expect("manifest");
         fs::create_dir_all(dir.join("lib")).expect("lib");
         fs::write(dir.join("lib/index.js"), "module.exports={}").expect("entry");
@@ -3032,7 +3032,10 @@ mod tests {
         assert!(
             entries.is_empty(),
             "staging dir must be empty so fs::rename can land on it; got {:?}",
-            entries.iter().map(|e| e.as_ref().unwrap().file_name()).collect::<Vec<_>>()
+            entries
+                .iter()
+                .map(|e| e.as_ref().unwrap().file_name())
+                .collect::<Vec<_>>()
         );
     }
 

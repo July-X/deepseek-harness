@@ -43,6 +43,7 @@
 - 端口可配置（默认 3080）
 - 内核运行日志查看；应用退出时自动回收内核子进程
 - **插件管理**：社区插件（npm 包或 GitHub 仓库）统一存入 `~/.dsh/plugins/`，以**链接**（默认，Windows 自动降级**复制**）的方式进入每个已安装内核（`~/.dsh/desktop/kernels/<版本>/plugins/`），并自动接线进 profile——切换内核无需重装；「插件中心」对接 [dsh-plugin-hub](https://dsh-plugin.org) 目录（分类/搜索/排序/已安装过滤，6 小时本地缓存，官方 market 兜底），安装前校验 dsh 规范；管理面板提供安装/卸载/更新/切换模式/同步，检测到新版本时在卡片与启动时提醒
+- **技能管理**：社区技能（npm 包 / GitHub 仓库 / 本地文件夹）统一存入 `~/.dsh/skills-store/`，按「包安装、单技能启停」的粒度以链接（失败降级复制）物化进内核自带扫描的 `~/.dsh/skills/`——不改 cordis 配置、不装依赖、切换内核零操作；内核对技能根做文件监视，**启用/停用/卸载/更新对运行中的工作台即时生效，无需重启**；安装前逐个校验 SKILL.md frontmatter（kebab-case `name` + `description` 必填），避免"装了却不出现"；本地文件夹来源支持改完点「重新同步」；启动时自动对账（补链、清扫孤儿链接、恢复中断的更新）
 
 ## 目录结构
 
@@ -53,10 +54,12 @@ desktop/
 │   ├── index.html
 │   ├── styles.css
 │   ├── plugins.js            # 插件管理卡片（安装/更新/目录搜索/更新提醒）
+│   ├── skills.js             # 技能管理卡片（包安装/单技能启停/目录搜索/即时生效提示）
 │   ├── whale-icon.png        # 顶栏 logo（60 CSS px 显示，故由 assets/whale-icon-small.svg 渲染 128px）
 │   └── app.js
 ├── docs/
-│   └── plugin-management.md  # 插件管理设计（目录布局、链接/复制双模式、接线、更新机制）
+│   ├── plugin-management.md  # 插件管理设计（目录布局、链接/复制双模式、接线、更新机制）
+│   └── skill-management.md   # 技能管理设计（中央库 + 物化到 ~/.dsh/skills，热生效，无需接线）
 ├── assets/                   # 全仓库图标母版（scripts/build-icons.sh 由此再生成一切）
 │   ├── whale-icon.svg        # 完整细节母版（黑鲸 + 红眼，用于 ≥128px）
 │   ├── whale-icon-small.svg  # 小尺寸母版（红眼夸大版，用于 ≤64px 与 favicon 投影）
@@ -70,9 +73,10 @@ desktop/
 │   ├── icons/                # 应用图标集（黑鲸+红眼，由 assets 管线生成并提交）
 │   └── src/
 │       ├── main.rs / lib.rs  # 入口与装配（含退出时回收内核）
-│       ├── commands.rs       # Tauri 命令（含插件命令与切换/启动接线钩子）
+│       ├── commands.rs       # Tauri 命令（含插件/技能命令与切换/启动接线钩子）
 │       ├── kernel.rs         # 安装 / active / 启动 / 停止 / 端口探测
 │       ├── plugins.rs        # 插件中央库、内核物化（link/copy）、profile 接线、更新检查、社区目录
+│       ├── skills.rs         # 技能中央库、单技能物化到 ~/.dsh/skills（link/copy）、启停、更新检查、目录、启动对账
 │       ├── releases.rs       # 官方发布列表（API + Atom 回退 + semver 排序）
 │       ├── node.rs           # Node/pnpm 检测与版本校验
 │       └── settings.rs       # settings.json 读写（含 profile 名）

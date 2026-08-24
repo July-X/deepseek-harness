@@ -35,6 +35,10 @@
       <path d="M7 7h10v4a5 5 0 0 1-10 0V7z" />
       <path d="M12 16v5" />
     </symbol>
+    <symbol id="i-skill" viewBox="0 0 24 24">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    </symbol>
     <symbol id="i-sliders" viewBox="0 0 24 24">
       <line x1="4" y1="21" x2="4" y2="14" />
       <line x1="4" y1="10" x2="4" y2="3" />
@@ -126,6 +130,11 @@
           <svg class="icon"><use href="#i-plug" /></svg>
           <span>插件</span>
           <span id="pluginUpdateBadge" class="badge hidden"></span>
+        </button>
+        <button type="button" class="menu-item" data-panel="panelSkills">
+          <svg class="icon"><use href="#i-skill" /></svg>
+          <span>技能</span>
+          <span id="skillUpdateBadge" class="badge hidden"></span>
         </button>
         <button type="button" class="menu-item" data-panel="panelSettings">
           <svg class="icon"><use href="#i-sliders" /></svg><span>设置</span>
@@ -286,6 +295,74 @@
         </div>
       </section>
 
+      <!-- 技能：已安装技能包、启停开关、手动安装与技能中心 -->
+      <section class="panel hidden" id="panelSkills">
+        <div class="card" id="cardSkills">
+          <div class="card-head">
+            <h2>已安装</h2>
+            <span class="head-meta">
+              <button id="btnSkillCheck" type="button" class="ghost">
+                <svg class="icon"><use href="#i-refresh" /></svg><span>检查更新</span>
+              </button>
+            </span>
+          </div>
+          <p class="muted">
+            技能统一存放于 <code>~/.dsh/skills-store/</code>，以链接方式进入内核读取的
+            <code>~/.dsh/skills/</code>（链接失败自动降级复制）；启用、停用与卸载对运行中的工作台<b>即时生效</b>，无需重启。
+          </p>
+          <div id="skillWarning" class="warning hidden"></div>
+          <div id="skillList" class="installed-list">
+            <p class="muted">尚未安装任何技能包。</p>
+          </div>
+          <p id="skillRootHint" class="muted skill-root-hint hidden"></p>
+          <h3>手动安装</h3>
+          <div class="install-row">
+            <input id="skillSpec" type="text" placeholder="npm 包名、GitHub 仓库 URL 或本地文件夹路径" spellcheck="false" />
+            <select id="skillMode" title="物化模式">
+              <option value="link">链接（默认）</option>
+              <option value="copy">复制</option>
+            </select>
+            <button id="btnSkillInstall" type="button">
+              <svg class="icon"><use href="#i-download" /></svg><span>安装</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="card" id="cardSkillCatalog">
+          <div class="card-head">
+            <h2 class="card-head-with-logo">
+              <img class="brand-logo github-logo" src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png" alt="GitHub" />
+              <span>技能中心</span>
+            </h2>
+            <span class="head-meta">
+              <span id="skillCatalogCount" class="muted"></span>
+              <button id="btnSkillCatalogReload" type="button" class="ghost">
+                <svg class="icon"><use href="#i-refresh" /></svg><span>刷新目录</span>
+              </button>
+            </span>
+          </div>
+          <p class="muted">
+            社区技能目录；也可在
+            <a href="https://github.com/topics/dsh-skill" target="_blank" rel="noreferrer">GitHub dsh-skill topic</a>
+            浏览后把仓库地址粘贴到上方手动安装。
+          </p>
+          <div class="install-row">
+            <input id="skillCatalogQuery" type="text" placeholder="搜索技能名称、描述…" spellcheck="false" />
+            <select id="skillCatalogFilter" title="安装状态">
+              <option value="all">全部</option>
+              <option value="installed">已安装</option>
+              <option value="not-installed">未安装</option>
+            </select>
+          </div>
+          <div id="skillCatalogList" class="catalog-list"></div>
+          <div class="catalog-more">
+            <button id="btnSkillCatalogMore" type="button" class="ghost hidden">
+              <svg class="icon"><use href="#i-chevron-down" /></svg><span>显示更多</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
       <!-- 设置：端口、profile 与 Node 检测 -->
       <section class="panel hidden" id="panelSettings">
         <div class="card" id="cardSettings">
@@ -370,5 +447,6 @@
 
   <script src="app.js" defer></script>
   <script src="plugins.js" defer></script>
+  <script src="skills.js" defer></script>
 </body>
 </html>
