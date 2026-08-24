@@ -267,11 +267,13 @@
             <p class="muted">尚未安装任何插件。</p>
           </div>
           <h3 class="section-divider">手动安装</h3>
-          <div class="install-row install-row-narrow">
-            <input id="pluginSpec" type="text" placeholder="npm i @scope/pkg · 也支持 owner/repo、dsh add" spellcheck="false" />
-            <button id="btnPluginInstall" type="button">
-              <svg class="icon"><use href="#i-download" /></svg><span>安装</span>
-            </button>
+          <div class="install-row">
+            <div class="input-with-action">
+              <input id="pluginSpec" type="text" placeholder="npm i @scope/pkg · 也支持 owner/repo、dsh add" spellcheck="false" />
+              <button id="btnPluginInstall" type="button" class="input-action" aria-label="安装">
+                <svg class="icon"><use href="#i-download" /></svg>
+              </button>
+            </div>
           </div>
         </div>
 
