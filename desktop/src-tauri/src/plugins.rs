@@ -1127,6 +1127,34 @@ pub fn reconcile_store(data_dir: &Path) {
     }
 }
 
+/// Resolve the version a plugin install should pin to, given the npm doc
+/// and the user-supplied pin (or `None` for "give me whatever the
+/// package's `latest` dist-tag points at"). Returns the resolved version
+/// string plus the label that should appear in error messages when the
+/// resolution yields an empty string.
+///
+/// Dist-tag resolution rule:
+/// - `pin = None` → look up `dist-tags.latest`, fall back to "" if absent
+/// - `pin = Some(tag)` where `tag` matches a dist-tag → use that tag's version
+/// - `pin = Some(ver)` where `ver` doesn't match a dist-tag → use the pin
+///   as a literal semver string (the caller will surface
+///   `versions[ver]` lookup failures with a clear error)
+fn resolve_npm_version(doc: &NpmDoc, pin: Option<&str>) -> (String, String) {
+    match pin {
+        Some(tag) => (
+            doc.dist_tags
+                .get(tag)
+                .cloned()
+                .unwrap_or_else(|| tag.to_string()),
+            tag.to_string(),
+        ),
+        None => (
+            doc.dist_tags.get("latest").cloned().unwrap_or_default(),
+            "latest".to_string(),
+        ),
+    }
+}
+
 fn fetch_npm(
     spec: &PluginSpec,
     dest: &Path,
@@ -1135,13 +1163,20 @@ fn fetch_npm(
     on_progress(&format!("正在查询 npm registry：{}", spec.source));
     let doc =
         fetch_npm_doc(&spec.source).map_err(|e| AppError::Plugin(format!("查询 npm 失败：{e}")))?;
-    let version = spec
-        .pin
-        .clone()
-        .unwrap_or_else(|| doc.dist_tags.get("latest").cloned().unwrap_or_default());
+    // Resolve the requested version through `dist-tags` first so a
+    // pin like `@latest` (or `@next`, `@beta`) lands on the actual
+    // semver string `versions` is keyed by. Without this hop the
+    // literal `"latest"` is used as a `versions` key, the lookup
+    // returns `None`, and the user sees
+    // 「npm 上 @linxin666/dsh-liangshen@latest 没有可下载的 tarball」
+    // even though the package and its latest tarball both exist on
+    // the registry. A pin that doesn't match any dist-tag falls
+    // through unchanged so literal semver pins like `@1.2.3` still
+    // hit `versions` directly.
+    let (version, pin_label) = resolve_npm_version(&doc, spec.pin.as_deref());
     if version.is_empty() {
         return Err(AppError::Plugin(format!(
-            "npm 上找不到包 {} 或其 latest 标记",
+            "npm 上找不到包 {} 或其 {pin_label} 标记",
             spec.source
         )));
     }
@@ -2668,6 +2703,57 @@ mod tests {
         let unpinned = parse_spec("dsh-market@1.2.3").unwrap();
         assert_eq!(unpinned.source, "dsh-market");
         assert_eq!(unpinned.pin.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn resolves_npm_version_through_dist_tags() {
+        // Pinning to "latest" should hop through `dist-tags.latest` to
+        // the actual semver the registry publishes — without this hop
+        // the literal `"latest"` is used as a `versions` key and the
+        // user sees "没有可下载的 tarball" even though the package
+        // and its tarball both exist (the bug @linxin666/dsh-liangshen
+        // hit on the user's machine).
+        let doc: NpmDoc = serde_json::from_str(
+            r#"{
+                "dist-tags": {"latest": "0.3.2", "next": "1.0.0-rc.1"},
+                "versions": {
+                    "0.3.2": {},
+                    "1.0.0-rc.1": {},
+                    "0.1.0": {}
+                }
+            }"#,
+        )
+        .expect("npm doc");
+        assert_eq!(
+            resolve_npm_version(&doc, None),
+            ("0.3.2".into(), "latest".into())
+        );
+        assert_eq!(
+            resolve_npm_version(&doc, Some("latest")),
+            ("0.3.2".into(), "latest".into())
+        );
+        assert_eq!(
+            resolve_npm_version(&doc, Some("next")),
+            ("1.0.0-rc.1".into(), "next".into())
+        );
+        // Literal semver pin: keep the pin unchanged so the caller's
+        // `versions[<pin>]` lookup surfaces a precise error.
+        assert_eq!(
+            resolve_npm_version(&doc, Some("1.0.0-rc.1")),
+            ("1.0.0-rc.1".into(), "1.0.0-rc.1".into())
+        );
+        assert_eq!(
+            resolve_npm_version(&doc, Some("9.9.9")),
+            ("9.9.9".into(), "9.9.9".into())
+        );
+
+        // No `dist-tags.latest`: `None` returns empty, error surfaces
+        // "找不到包 … 或其 latest 标记".
+        let doc: NpmDoc = serde_json::from_str(r#"{"versions": {"1.0.0": {}}}"#).unwrap();
+        assert_eq!(
+            resolve_npm_version(&doc, None),
+            ("".into(), "latest".into())
+        );
     }
 
     #[test]
