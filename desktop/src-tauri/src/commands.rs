@@ -597,6 +597,19 @@ pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Resul
     window.set_focus().map_err(|e| e.to_string())
 }
 
+/// Tear down the management window after the user confirmed a full quit
+/// from the request-quit-confirm prompt. The window-close interceptor in
+/// `lib::run` calls `prevent_close()` first so this `destroy()` is the
+/// only thing that lets the OS X button actually close the panel; the
+/// `RunEvent::Exit` handler then reaps any kernel leftovers via pid file.
+#[tauri::command]
+pub fn confirm_close_shell(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("主壳窗口不存在（label: main）".to_string());
+    };
+    window.destroy().map_err(|e| e.to_string())
+}
+
 /// Move `window` so its top-left corner sits just below-right of the
 /// logical screen point `(x, y)`, clamped inside the monitor containing
 /// the point so the panel never lands off-screen. Monitor geometry is

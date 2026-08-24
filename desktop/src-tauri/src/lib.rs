@@ -21,7 +21,7 @@ mod version;
 use std::sync::Mutex;
 
 use commands::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager, WindowEvent};
 
 /// Lock a mutex, recovering the inner value when another thread panicked.
 pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -113,6 +113,7 @@ pub fn run() {
             commands::plugin_set_mode,
             commands::plugin_check_updates,
             commands::plugin_catalog,
+            commands::confirm_close_shell,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the dsh-desktop app");
@@ -121,7 +122,38 @@ pub fn run() {
     // serving after the app quits. The in-memory child covers kernels this
     // session spawned; the pid file covers orphans left by an earlier shell
     // run (e.g. after a crash), guarded by `kill_pid`'s kernel check.
+    //
+    // Closing the management window fires `WindowEvent::CloseRequested` *before*
+    // `RunEvent::Exit`. When the kernel is still running we `prevent_close()`
+    // and ping the UI to ask the user whether to fully quit — the UI then runs
+    // `stop_kernel` followed by `confirm_close_shell`, which destroys the main
+    // window programmatically. Without this prompt the user could close the
+    // panel, leave an orphan kernel holding the port, and a later start
+    // would fail with the misleading "port already open" diagnostic until
+    // the orphan is reaped on the next shell launch.
     app.run(|handle, event| {
+        if let tauri::RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } = &event
+        {
+            // Only intercept the management window's X button; the harness
+            // workbench webview (label "harness") is allowed to close
+            // without confirmation since it has no kernel handle of its own.
+            if label == "main" && kernel_running(handle) {
+                // Kernel running: ask the user before tearing the shell down.
+                // prevent_close() parks the close; the UI either confirms
+                // (calls stop_kernel + confirm_close_shell) or cancels.
+                api.prevent_close();
+                if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.emit("request-quit-confirm", ());
+                }
+            }
+            // No kernel running, or not the main window: let the close
+            // proceed. The Exit branch below still reaps any pid-file
+            // leftover from an earlier shell crash.
+        }
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
                 {
@@ -142,4 +174,17 @@ pub fn run() {
             }
         }
     });
+}
+
+/// Whether the kernel is currently serving traffic. Either the in-memory
+/// child handle is alive or the configured port answers — the latter catches
+/// kernels an earlier shell spawned whose pid we still need to reap.
+fn kernel_running(handle: &tauri::AppHandle) -> bool {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return false;
+    };
+    if lock(&state.running).is_some() {
+        return true;
+    }
+    kernel::port_open(settings::load(&state.data_dir).port)
 }

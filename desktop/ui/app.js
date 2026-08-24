@@ -222,9 +222,11 @@ function syncWorkbenchButtons() {
   const toggle = $('btnToggle');
   const openWindow = $('btnOpenWindow');
   const hint = $('startHint');
+  const firstRun = $('firstRunCallout');
   const busy = busyButtons.size > 0;
   const running = Boolean(k && k.running);
   const canStart = Boolean(k && k.active && k.active_installed);
+  const noKernel = Boolean(k && (!k.installed || k.installed.length === 0));
 
   // The toggle carries an SVG icon, so the label span owns the text.
   if (starting) {
@@ -239,6 +241,12 @@ function syncWorkbenchButtons() {
   }
   openWindow.disabled = !running || starting || busy;
   hint.classList.toggle('hidden', starting || running || canStart);
+  // First-run callout shows whenever no kernel is installed, regardless of
+  // whether a release list has been fetched — the user needs the prompt even
+  // before they click 「检查更新」. It hides the moment an install completes.
+  if (firstRun) {
+    firstRun.classList.toggle('hidden', !noKernel || starting || running);
+  }
 }
 
 // installedSet is hoisted by the caller: one Set per render pass instead of
@@ -808,11 +816,87 @@ $('btnShellCheck').addEventListener('click', () => checkShellUpdate(true));
 $('btnShellInstall').addEventListener('click', installShellUpdate);
 $('btnOpenDataDir').addEventListener('click', openDataDir);
 
+// First-run callout: both buttons lead the user toward picking and
+// installing a kernel. 「选择并安装内核」 switches to the versions panel
+// and triggers 「检查更新」 so the npm release list is already populated
+// when the user arrives. 「安装最新版本」 fetches and installs the
+// highest-priority release without leaving the overview.
+function firstRunShowPanel(panelId) {
+  document.querySelectorAll('.menu-item').forEach((m) => {
+    m.classList.toggle('active', m.dataset.panel === panelId);
+  });
+  document.querySelectorAll('.panel').forEach((p) => {
+    p.classList.toggle('hidden', p.id !== panelId);
+  });
+}
+$('btnFirstRunPick').addEventListener('click', () => {
+  firstRunShowPanel('panelVersions');
+  checkUpdates();
+});
+$('btnFirstRunLatest').addEventListener('click', () => {
+  setBusy(true);
+  invoke('fetch_releases')
+    .then((list) => {
+      releases = list.releases || [];
+      renderReleases();
+      if (!releases.length) {
+        toast('没有获取到官方发布，请稍后再试', 4000);
+        return null;
+      }
+      // Releases come back sorted newest-first (cmp_versions reversed on the
+      // Rust side). Prefer the first stable release so we don't auto-install
+      // an `rc.*` on first run; if every release is prerelease, fall back
+      // to the newest available rather than blocking the user.
+      const stable = releases.find((r) => !r.prerelease);
+      return installVersion((stable || releases[0]).version);
+    })
+    .catch((e) => toast('获取发布失败：' + e, 6000))
+    .finally(() => setBusy(false));
+});
+
 // Startup self-update discovery: the shell emits this after its background
 // check; the manual button covers on-demand checks.
 if (window.__TAURI__ && window.__TAURI__.event) {
   window.__TAURI__.event.listen('shell-update-available', (e) => {
     showShellUpdateBanner(e.payload);
+  });
+}
+
+// Full-quit confirmation: the Rust side intercepts the main window's X
+// button when the kernel is still running, calls `prevent_close()`, and
+// pings this listener. We surface the same in-page modal used for the
+// 「停止内核」 action so the user is never asked to confirm two different
+// exit flows in two different visual styles. The pending flag suppresses
+// re-entry if the user mashes the X while the dialog is up.
+let quitConfirmPending = false;
+if (window.__TAURI__ && window.__TAURI__.event) {
+  window.__TAURI__.event.listen('request-quit-confirm', () => {
+    if (quitConfirmPending) {
+      return;
+    }
+    quitConfirmPending = true;
+    confirmDialog(
+      '完全退出？',
+      '工作台仍在运行。关闭主壳前需要先关闭工作台；继续吗？',
+      '关闭并退出'
+    )
+      .then((ok) => {
+        if (!ok) {
+          return;
+        }
+        // Stop the kernel first so the port frees up before the shell
+        // tears down — this matches what `stop_kernel` does on the
+        // standalone 「关闭工作台」 path. The window destroy below
+        // intentionally has no fallback: if it fails the kernel is
+        // already gone and the user can quit again or close manually.
+        return invoke('stop_kernel')
+          .catch((e) => toast('关闭工作台失败：' + e, 5000))
+          .then(() => invoke('confirm_close_shell'))
+          .catch((e) => toast('退出失败：' + e + '（请手动关闭窗口）', 6000));
+      })
+      .finally(() => {
+        quitConfirmPending = false;
+      });
   });
 }
 
