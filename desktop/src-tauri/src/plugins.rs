@@ -1940,14 +1940,19 @@ where
 
 impl HubRaw {
     /// Normalize a hub entry to the shared catalog item. The hub feed
-    /// distinguishes three install paths, picked here in priority order:
+    /// distinguishes four install paths, picked here in priority order:
     ///
     /// 1. `npmPackage` set → install from npm (author-published package,
     ///    no compile step; preferred when the author ships one).
     /// 2. `repo` set → install from the GitHub repo via `git clone`.
-    /// 3. neither → install from npm using the plugin's display name as
-    ///    the package (legacy fallback for npm-only entries that never
-    ///    filled in `r`).
+    /// 3. `repo` missing/empty but `o` + `n` both populated → fall back
+    ///    to `github.com/{o}/{n}.git`. The hub has dozens of these — the
+    ///    author published the GitHub repo but left the `r` manifest
+    ///    field blank, so without this fallback `parse_spec` would route
+    ///    the install to npm with the display name, hit a 404, and leave
+    ///    the user with the misleading 「查询 npm 失败：404」 error.
+    /// 4. last-ditch → npm with the display name (legacy fallback for
+    ///    genuinely npm-only entries that never filled in `r`).
     ///
     /// The catalog UI surfaces the chosen origin on each card so the user
     /// sees whether an 「安装」 button triggers an npm or git fetch.
@@ -1965,6 +1970,11 @@ impl HubRaw {
             ("npm", pkg.clone())
         } else if let Some(r) = &repo {
             ("git", format!("https://github.com/{r}.git"))
+        } else if !self.o.is_empty() && !self.n.is_empty() {
+            (
+                "git",
+                format!("https://github.com/{}/{}.git", self.o, self.n),
+            )
         } else {
             ("npm", self.n.clone())
         };
@@ -2627,6 +2637,23 @@ mod tests {
         let item = raw.into_item();
         assert_eq!(item.origin, "npm");
         assert_eq!(item.spec, "plug");
+        assert!(item.repo.is_none());
+    }
+
+    #[test]
+    fn hub_entry_missing_repo_falls_back_to_owner_name_git() {
+        // Author published the GitHub repo but left `r` blank in the
+        // manifest. Without this fallback `parse_spec` would route the
+        // install to npm with the display name, hit a 404, and surface
+        // the misleading 「查询 npm 失败：404」 error the user just
+        // reported on `dsh-web-ui`. `o` + `n` give us enough to
+        // reconstruct the canonical github.com URL.
+        let raw: HubRaw =
+            serde_json::from_str(r#"{"s":"dsh-web-ui","o":"someone","n":"dsh-web-ui"}"#)
+                .expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "git");
+        assert_eq!(item.spec, "https://github.com/someone/dsh-web-ui.git");
         assert!(item.repo.is_none());
     }
 
