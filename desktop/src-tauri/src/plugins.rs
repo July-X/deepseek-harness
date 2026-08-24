@@ -2252,10 +2252,25 @@ fn from_market_raw(raw: CatalogRaw) -> CatalogItem {
     }
 }
 
+/// Drop catalog entries the plugin center should not surface. The UI
+/// frames npm install as the canonical path (placeholder reads
+/// `npm i @scope/pkg …`), and the manual-install flow also resolves
+/// `npm i`/`pnpm add`/`yarn add`/`bun add` natively — entries with no
+/// npm package are therefore un-installable through the center's UI.
+/// They are still reachable through the manual install input (where
+/// `owner/repo` / git URL / dsh plugin CLI work) but the catalog
+/// should not list them, otherwise every 「安装」 button on those
+/// rows would 404 against the npm registry.
+fn filter_npm_origin(items: Vec<CatalogItem>) -> Vec<CatalogItem> {
+    items.into_iter().filter(|i| i.origin == "npm").collect()
+}
+
 /// Fetch the community catalog, caching the normalized items for
 /// CATALOG_TTL_SECS (`force` bypasses the cache). The dsh-plugin.org hub is
 /// the primary source; the reference market listing is the fallback when the
-/// hub is unreachable.
+/// hub is unreachable. The cached payload is always filtered to npm-origin
+/// entries so a stale cache written before this filter was introduced does
+/// not leak git-only rows into the plugin center on first read.
 fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, String> {
     let cache = data_dir.join(CATALOG_CACHE_FILE);
     let fresh = !force
@@ -2267,7 +2282,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
     if fresh {
         if let Ok(text) = fs::read_to_string(&cache) {
             if let Ok(items) = serde_json::from_str::<Vec<CatalogItem>>(&text) {
-                return Ok(items);
+                return Ok(filter_npm_origin(items));
             }
         }
     }
@@ -2285,6 +2300,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
             doc.items.into_iter().map(from_market_raw).collect()
         }
     };
+    let items = filter_npm_origin(items);
     if fs::create_dir_all(data_dir).is_ok() {
         if let Ok(text) = serde_json::to_string(&items) {
             let _ = fs::write(&cache, text);
@@ -2703,6 +2719,45 @@ mod tests {
         let unpinned = parse_spec("dsh-market@1.2.3").unwrap();
         assert_eq!(unpinned.source, "dsh-market");
         assert_eq!(unpinned.pin.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn filter_npm_origin_drops_git_only_entries() {
+        // The plugin center only surfaces entries that the 「安装」
+        // button can actually pull from npm. Git-only entries are
+        // still reachable through the manual-install input (which
+        // accepts owner/repo / git URL / dsh plugin CLI), but listing
+        // them in the catalog would surface 404s the moment the user
+        // clicks install.
+        let mk = |id: &str, name: &str, origin: &str, spec: &str, repo: Option<&str>| CatalogItem {
+            id: id.into(),
+            name: name.into(),
+            kind: String::new(),
+            description: String::new(),
+            stars: 0,
+            forks: 0,
+            downloads: 0,
+            verified: false,
+            repo: repo.map(str::to_string),
+            spec: spec.into(),
+            origin: origin.into(),
+            category: String::new(),
+            version: String::new(),
+            tags: vec![],
+            updated: String::new(),
+            detail_url: String::new(),
+        };
+        let npm_only = mk("a", "a", "npm", "@scope/a", Some("owner/a"));
+        let git_only = mk("b", "b", "git", "https://github.com/owner/b.git", None);
+
+        let out = filter_npm_origin(vec![npm_only.clone(), git_only]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "a");
+        assert_eq!(out[0].origin, "npm");
+        // Empty input is a no-op.
+        assert!(filter_npm_origin(vec![]).is_empty());
+        // All-npm passes through unchanged.
+        assert_eq!(filter_npm_origin(vec![npm_only.clone(), npm_only]).len(), 2);
     }
 
     #[test]
