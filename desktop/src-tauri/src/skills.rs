@@ -892,7 +892,14 @@ fn fetch_into_store(
     let store = store_dir(home);
     fs::create_dir_all(&store).map_err(|e| AppError::Io(e.to_string()))?;
     let tmp = new_staging_dir(&store, TMP_PREFIX).map_err(|e| AppError::Io(e.to_string()))?;
-    stamp_id_marker(&tmp, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
+    // Stamping the `.dsh-id` marker must wait until AFTER the fetch_* call
+    // returns: `git clone` requires an empty destination dir and aborts with
+    // "destination path '...' already exists and is not an empty directory"
+    // when the marker file is present at fetch time; `npm` tarball extraction
+    // and `local` copy would happily overwrite the marker anyway, so
+    // stamping pre-fetch only ever worked for npm by accident. The marker
+    // travels with the contents when we rename `tmp → new`, so stamp after
+    // fetch and let the rename propagate it into the new staging path.
 
     let version = match spec.origin.as_str() {
         "npm" => fetch_npm(spec, &tmp, on_progress),
@@ -907,6 +914,7 @@ fn fetch_into_store(
             return Err(e);
         }
     };
+    stamp_id_marker(&tmp, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
 
     on_progress("正在扫描包内技能并校验 frontmatter");
     let mut warnings: Vec<String> = Vec::new();
