@@ -728,15 +728,17 @@ fn fetch_into_store(
 ) -> Result<StoreItem, AppError> {
     let store = store_dir(data_dir);
     fs::create_dir_all(&store).map_err(|e| AppError::Io(e.to_string()))?;
-    let tmp = new_staging_dir(&store, TMP_PREFIX, &spec.id)
-        .map_err(|e| AppError::Io(e.to_string()))?;
-    // `tmp` is the only place we stamp the marker pre-rename. It gives
-    // a leftover in-flight dir an identity for `reconcile_store` if the
-    // shell crashes during fetch or validation, and the marker travels
-    // with the contents when we rename `tmp → new` later in this
-    // function, so `new` picks it up without us having to write to the
-    // rename target (which would make it non-empty and break Windows).
-    stamp_id_marker(&tmp, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
+    let tmp =
+        new_staging_dir(&store, TMP_PREFIX, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
+    // Stamping the `.dsh-id` marker must wait until AFTER fetch_* returns:
+    // `git clone` requires an empty destination dir and aborts with
+    // "destination path '...' already exists and is not an empty directory"
+    // when the marker file is present at fetch time. The npm flow's tarball
+    // extraction would happily overwrite the marker anyway, so stamping
+    // pre-fetch only ever worked for npm by accident. Stamping here — once
+    // the staged tree is on disk and validated-empty-by-fetch — still gives
+    // `reconcile_store` the identity it needs during validation/publish,
+    // and the marker travels with the contents when we rename `tmp → new`.
 
     let version = match spec.origin.as_str() {
         "npm" => fetch_npm(spec, &tmp, on_progress),
@@ -750,6 +752,7 @@ fn fetch_into_store(
             return Err(e);
         }
     };
+    stamp_id_marker(&tmp, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
 
     on_progress("正在校验插件是否符合 dsh 规范");
     if let Err(e) = validate_plugin(&tmp) {
@@ -771,14 +774,12 @@ fn fetch_into_store(
     // uninstalled plugin. If recovery itself fails, the function
     // returns the error with the staged state left on disk for
     // `reconcile_store` to repair on the next launch.
-    let new = new_staging_dir(&store, NEW_PREFIX, &spec.id)
-        .map_err(|e| AppError::Io(e.to_string()))?;
+    let new =
+        new_staging_dir(&store, NEW_PREFIX, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
     if let Err(e) = fs::rename(&tmp, &new) {
         // `tmp` still holds the validated content; leave it on disk so
         // a retry / `reconcile_store` can promote it.
-        return Err(AppError::Io(format!(
-            "将暂存目录提升到 .new-* 失败：{e}"
-        )));
+        return Err(AppError::Io(format!("将暂存目录提升到 .new-* 失败：{e}")));
     }
 
     let final_dir = store_plugin_dir(data_dir, &spec.id);
@@ -793,9 +794,7 @@ fn fetch_into_store(
             // to install this plugin.
             if fs::rename(&new, &final_dir).is_err() {
                 let _ = fs::remove_dir_all(&new);
-                return Err(AppError::Io(format!(
-                    "备份旧版本失败且无法发布新版本：{e}"
-                )));
+                return Err(AppError::Io(format!("备份旧版本失败且无法发布新版本：{e}")));
             }
             return Err(AppError::Io(format!(
                 "插件已发布，但备份旧版本失败（{e}）；下次更新若失败将无法回滚"
@@ -819,13 +818,9 @@ fn fetch_into_store(
         // next launch; if it fails, both states exist on disk for the
         // recovery scan to reconcile.
         if fs::rename(&backup, &final_dir).is_err() {
-            return Err(AppError::Io(format!(
-                "发布新版本失败且回滚旧版本失败：{e}"
-            )));
+            return Err(AppError::Io(format!("发布新版本失败且回滚旧版本失败：{e}")));
         }
-        return Err(AppError::Io(format!(
-            "发布新版本失败，已回滚到旧版本：{e}"
-        )));
+        return Err(AppError::Io(format!("发布新版本失败，已回滚到旧版本：{e}")));
     }
 
     // Synchronous cleanup of the now-redundant backup. Failure here is
@@ -1073,18 +1068,58 @@ fn fetch_git(
     if let Some(tag) = &branch {
         cmd.arg("--branch").arg(tag);
     }
-    let status = quiet(&mut cmd)
+    // stderr 是 git 唯一的诊断输出（"Repository not found"、
+    // "could not resolve host"、"authentication failed"、"SSL certificate
+    // problem"…）。早期实现把它和 stdout 都吞掉，导致失败时 UI 只能
+    // 显示无意义的 "exit code 128"，用户根本看不出是仓库不存在、网络
+    // 不通、还是权限问题。这里改成 piped；错误时优先挑出 fatal/error
+    // 行（"Cloning into 'X'..." 是首行纯提示，紧跟其后的 fatal: 才是
+    // 真正原因；某些情况下 git 还会在 stdout 上吐诊断信息，一并捕获）。
+    let output = quiet(&mut cmd)
         .arg(&spec.source)
         .arg(dest)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|e| AppError::Io(format!("无法运行 git：{e}")))?;
-    if !status.success() {
-        return Err(AppError::Plugin(format!(
-            "git clone 失败（退出码 {:?}），请检查地址与网络",
-            status.code()
-        )));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 优先反向查找 "fatal:" / "error:" 行；找不到就退回到最后一行
+        // 非空 stderr，再退回 "，请检查地址与网络" 兜底文案。
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|l| {
+                let t = l.trim_start();
+                t.starts_with("fatal:") || t.starts_with("error:")
+            })
+            .or_else(|| {
+                stderr
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+            })
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let stdout_tail = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let code = output.status.code();
+        let mut msg = format!("git clone 失败（退出码 {:?}）", code);
+        if !detail.is_empty() {
+            msg.push_str(&format!("：{detail}"));
+        } else if !stdout_tail.is_empty() {
+            msg.push_str(&format!("：{stdout_tail}"));
+        } else {
+            msg.push_str("，请检查地址与网络");
+        }
+        return Err(AppError::Plugin(msg));
     }
     build_git_plugin(dest, pnpm_exe, on_progress)?;
     if let Some(tag) = branch {
@@ -1155,9 +1190,15 @@ fn build_git_plugin(
     // directory; without it the prepare step exits 127 with
     // `env: node: No such file or directory`.
     let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
-    let status =
-        kernel::run_pnpm(pnpm_exe, &args, dest, &log_path, &[pnpm_dir], &mut *on_progress)
-            .map_err(kernel::pnpm_spawn_err)?;
+    let status = kernel::run_pnpm(
+        pnpm_exe,
+        &args,
+        dest,
+        &log_path,
+        &[pnpm_dir],
+        &mut *on_progress,
+    )
+    .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() {
         return Err(AppError::Plugin(format!(
             "插件构建失败（退出码 {:?}）：`prepare` 未成功生成入口。详情见 {}",
@@ -1282,9 +1323,15 @@ fn install_store_deps(
         kernel::PNPM_NO_STRICT_DEP_BUILDS,
     ];
     let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
-    let status =
-        kernel::run_pnpm(pnpm_exe, &args, &dir, &log_path, &[pnpm_dir], &mut *on_progress)
-            .map_err(kernel::pnpm_spawn_err)?;
+    let status = kernel::run_pnpm(
+        pnpm_exe,
+        &args,
+        &dir,
+        &log_path,
+        &[pnpm_dir],
+        &mut *on_progress,
+    )
+    .map_err(kernel::pnpm_spawn_err)?;
     if !status.success() && !dir.join("node_modules").is_dir() {
         return Err(AppError::Plugin(format!(
             "插件依赖安装失败（退出码 {:?}），详情见日志：{}",
@@ -1981,7 +2028,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
 pub fn catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, AppError> {
     let mut items = fetch_catalog(data_dir, force)
         .map_err(|e| AppError::Plugin(format!("目录获取失败：{e}")))?;
-    items.sort_by(|a, b| b.stars.cmp(&a.stars));
+    items.sort_by_key(|a| std::cmp::Reverse(a.stars));
     Ok(items)
 }
 
@@ -2260,9 +2307,7 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
         let row_latest = item
             .latest_version
             .as_deref()
-            .filter(|l| {
-                is_newer_than(l, &item.installed_version, &item.origin, item.pinned)
-            })
+            .filter(|l| is_newer_than(l, &item.installed_version, &item.origin, item.pinned))
             .map(|s| s.to_string());
         rows.push(PluginRow {
             id: item.id.clone(),
@@ -2854,9 +2899,7 @@ mod tests {
 
     fn write_fake_plugin(dir: &Path, tag: &str) {
         fs::create_dir_all(dir).expect("mkdir plugin");
-        let pkg = format!(
-            r#"{{"name":"p","version":"{tag}","main":"lib/index.js"}}"#
-        );
+        let pkg = format!(r#"{{"name":"p","version":"{tag}","main":"lib/index.js"}}"#);
         fs::write(dir.join("package.json"), pkg).expect("manifest");
         fs::create_dir_all(dir.join("lib")).expect("lib");
         fs::write(dir.join("lib/index.js"), "module.exports={}").expect("entry");
@@ -3032,7 +3075,10 @@ mod tests {
         assert!(
             entries.is_empty(),
             "staging dir must be empty so fs::rename can land on it; got {:?}",
-            entries.iter().map(|e| e.as_ref().unwrap().file_name()).collect::<Vec<_>>()
+            entries
+                .iter()
+                .map(|e| e.as_ref().unwrap().file_name())
+                .collect::<Vec<_>>()
         );
     }
 

@@ -36,6 +36,10 @@ pub struct AppState {
 pub struct StatusView {
     /// Version of the running shell itself (from tauri.conf.json).
     pub shell_version: String,
+    /// True in debug builds (`tauri dev`). The panel uses it to wash its
+    /// header column with the whale-eye red so the dev shell is visually
+    /// distinct from an installed release shell sharing the screen.
+    pub dev_build: bool,
     pub kernel: kernel::KernelStatus,
     pub node: node::NodeInfo,
     pub settings: settings::Settings,
@@ -82,6 +86,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         let node_info = cached_node(&state, &settings);
         StatusView {
             shell_version: app.package_info().version.to_string(),
+            dev_build: cfg!(debug_assertions),
             kernel: kernel_status,
             node: node_info,
             settings,
@@ -571,16 +576,70 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
 /// raised-but-behind. Pinning the window topmost and immediately releasing
 /// it forces it to the head of the normal z-order regardless; on
 /// macOS/Linux the toggle is a harmless no-op raise.
+///
+/// `x`/`y` are the click's screen coordinates in CSS pixels
+/// (`MouseEvent.screenX/Y`); when present the panel is first repositioned
+/// next to the click so the user never has to hunt for it on another
+/// monitor. They are optional so an older injected script that invokes
+/// without arguments still raises the window in place.
 #[tauri::command]
-pub fn focus_main_shell(app: AppHandle) -> Result<(), String> {
+pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
         return Err("主壳窗口不存在（label: main）".to_string());
     };
+    if let (Some(x), Some(y)) = (x, y) {
+        reposition_near(&app, &window, x, y);
+    }
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_always_on_top(true);
     let _ = window.set_always_on_top(false);
     window.set_focus().map_err(|e| e.to_string())
+}
+
+/// Move `window` so its top-left corner sits just below-right of the
+/// logical screen point `(x, y)`, clamped inside the monitor containing
+/// the point so the panel never lands off-screen. Monitor geometry is
+/// converted to logical units per monitor (`position`/`size` are physical,
+/// `scale_factor` bridges the two); when no monitor contains the point —
+/// stale coordinates after a display change — the primary monitor (or the
+/// first enumerated one) is used instead.
+fn reposition_near(app: &AppHandle, window: &tauri::WebviewWindow, x: f64, y: f64) {
+    let Ok(monitors) = app.available_monitors() else {
+        return;
+    };
+    let containing = monitors.iter().find(|m| {
+        let s = m.scale_factor();
+        let p = m.position();
+        let sz = m.size();
+        x >= p.x as f64 / s
+            && x < (p.x as f64 + sz.width as f64) / s
+            && y >= p.y as f64 / s
+            && y < (p.y as f64 + sz.height as f64) / s
+    });
+    let monitor = match containing.cloned().or_else(|| {
+        app.primary_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| monitors.first().cloned())
+    }) {
+        Some(m) => m,
+        None => return,
+    };
+    let s = monitor.scale_factor();
+    let p = monitor.position();
+    let sz = monitor.size();
+    let (mx, my) = (p.x as f64 / s, p.y as f64 / s);
+    let (mw, mh) = (sz.width as f64 / s, sz.height as f64 / s);
+    let win = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(480, 800));
+    let (ww, wh) = (win.width as f64 / s, win.height as f64 / s);
+    // +12px keeps the panel clear of the cursor itself; the `.max(m*)`
+    // guards against windows wider/taller than the monitor.
+    let nx = (x + 12.0).clamp(mx, (mx + mw - ww).max(mx));
+    let ny = (y + 12.0).clamp(my, (my + mh - wh).max(my));
+    let _ = window.set_position(tauri::LogicalPosition::new(nx, ny));
 }
 
 // --- plugins ---------------------------------------------------------------
@@ -628,13 +687,20 @@ async fn run_plugin_command(
 
 /// Install a community plugin (npm package name or git URL) into the
 /// central store, materialize it into every kernel, and wire the profile.
+///
+/// `mode` is the materialization mode at install time. It is optional so
+/// callers do not have to pick at install time — the Installed list owns
+/// the mode-toggle surface (`plugin_set_mode`), and `plugins::install`
+/// already falls back to `link` when the caller passes anything other
+/// than `copy`.
 #[tauri::command]
 pub async fn plugin_install(
     app: AppHandle,
     spec: String,
-    mode: String,
+    mode: Option<String>,
     on_event: Channel<String>,
 ) -> Result<(), String> {
+    let mode = mode.unwrap_or_else(|| String::from("link"));
     run_plugin_command(
         app,
         on_event,

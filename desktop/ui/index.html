@@ -99,6 +99,11 @@
     <symbol id="i-folder" viewBox="0 0 24 24">
       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
     </symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24">
+      <path d="M12 3 2 21h20L12 3z" />
+      <line x1="12" y1="10" x2="12" y2="14" />
+      <line x1="12" y1="17" x2="12" y2="17" />
+    </symbol>
   </svg>
 
   <div class="layout">
@@ -131,6 +136,10 @@
           <svg class="icon"><use href="#i-sliders" /></svg><span>设置</span>
         </button>
       </nav>
+      <div class="safety-notice" role="note" title="第三方插件由社区提供，本桌面端不对其代码行为与安全性负责，请自行甄别后再安装。">
+        <svg class="icon" aria-hidden="true"><use href="#i-alert" /></svg>
+        <p>第三方插件由社区提供，本工具不对其安全性负责，请自行甄别。</p>
+      </div>
     </aside>
 
     <main>
@@ -234,13 +243,9 @@
           <div id="pluginList" class="installed-list">
             <p class="muted">尚未安装任何插件。</p>
           </div>
-          <h3>手动安装</h3>
-          <div class="install-row">
-            <input id="pluginSpec" type="text" placeholder="npm 包名（@scope/name）或 GitHub 仓库 URL" spellcheck="false" />
-            <select id="pluginMode" title="物化模式">
-              <option value="link">链接（默认）</option>
-              <option value="copy">复制</option>
-            </select>
+          <h3 class="section-divider">手动安装</h3>
+          <div class="install-row install-row-narrow">
+            <input id="pluginSpec" type="text" placeholder="GitHub 仓库地址（owner/repo 或完整 URL）或 npm 包名（@scope/name）" spellcheck="false" />
             <button id="btnPluginInstall" type="button">
               <svg class="icon"><use href="#i-download" /></svg><span>安装</span>
             </button>
