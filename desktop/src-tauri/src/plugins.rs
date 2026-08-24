@@ -297,11 +297,20 @@ fn plugin_log_path(data_dir: &Path, id: &str) -> PathBuf {
 
 /// Map a package/repo name to a filesystem-safe store id. Path traversal is
 /// structurally impossible afterwards: slashes become double underscores and
-/// dot / empty segments are rejected outright.
+/// dot / empty segments are rejected outright. Whitespace is also rejected
+/// because npm names and GitHub `owner/repo` strings are both single
+/// tokens — a string like `dsh plugin remove @scope/pkg` reaching this
+/// function means the caller forgot to peel a CLI invocation in
+/// `split_dsh_plugin_cli`; the store id should not silently swallow it.
 pub fn id_for_name(raw: &str) -> Result<String, AppError> {
     let name = raw.trim();
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::Plugin("插件名称为空或过长".into()));
+    }
+    if name.chars().any(|c| c.is_whitespace()) {
+        return Err(AppError::Plugin(format!(
+            "非法的插件名称 {name:?}（包含空白字符）"
+        )));
     }
     for part in name.split('/') {
         if part.is_empty() || part == "." || part == ".." {
@@ -397,6 +406,119 @@ fn write_meta(data_dir: &Path, version: &str, id: &str, meta: &KernelMeta) -> Re
 
 // --- spec parsing -----------------------------------------------------------
 
+/// Try to peel a `dsh plugin ... add <pkg>` CLI invocation out of an install
+/// spec. Returns the requested profile (if any) plus the bare package spec
+/// the rest of the parser can handle. Returns `None` for inputs that don't
+/// match the CLI shape — those fall through to the existing npm / git /
+/// owner-repo parsing.
+///
+/// The shell only accepts the manual-install form of the kernel's `dsh
+/// plugin` command: `add` and `install` (the kernel treats them as aliases).
+/// `remove` /`update` /`list` are rejected so a pasted command can't
+/// accidentally uninstall a plugin the user only meant to install. The
+/// `--profile` (or `-p`) flag is parsed but ignored: the shell always
+/// wires plugins into `DEFAULT_PROFILE` (`web`); supporting multiple
+/// profiles is tracked separately.
+///
+/// Recognised shapes:
+///
+/// ```text
+/// dsh plugin add <pkg>
+/// dsh plugin install <pkg>
+/// dsh plugin --profile web add <pkg>
+/// dsh plugin -p web install <pkg>
+/// ```
+///
+/// Trailing flags the kernel might accept (`--save-dev`, `--force`, …) are
+/// silently dropped — the shell's parser only needs the package spec.
+fn split_dsh_plugin_cli(spec: &str) -> Option<(Option<String>, String)> {
+    let s = spec.trim();
+    let after_dsh = s.strip_prefix("dsh ")?;
+    let after_plugin = after_dsh.trim_start().strip_prefix("plugin")?;
+    let args = after_plugin.trim();
+
+    let mut profile: Option<String> = None;
+    let mut package: Option<String> = None;
+    let mut iter = args.split_whitespace();
+    while let Some(arg) = iter.next() {
+        match arg {
+            "--profile" | "-p" => {
+                profile = iter.next().map(str::to_string);
+            }
+            "add" | "install" => {
+                // First positional after the verb is the package spec. We
+                // don't bother tracking trailing flags — anything after
+                // the package spec is dropped as the manual-install flow
+                // doesn't need it.
+                package = iter.next().map(str::to_string);
+                break;
+            }
+            _ => {
+                // Unknown leading flag — bail out and let the regular
+                // npm / git parser decide. This is what catches
+                // `dsh plugin something` typed by accident.
+                return None;
+            }
+        }
+    }
+    package.map(|p| (profile, p))
+}
+
+/// Try to peel a package-manager install command out of an install spec
+/// (`npm install <pkg>`, `pnpm add <pkg>`, `yarn add <pkg>`,
+/// `bun add <pkg>` …). Returns the bare package spec, or `None` when the
+/// input does not match that shape — those fall through to the regular
+/// npm / git / owner-repo parsing.
+///
+/// Flags are silently dropped wherever they appear (before or after the
+/// verb, before or after the package spec). The shell has no concept of
+/// `--save-dev` / `--global` / `--registry` — every accepted form ends
+/// up at the same store path under `<dsh_home>/plugins/`. The only verb
+/// forms accepted are `install` / `i` / `add` (npm's `install` and `i`
+/// are aliases for the same action; `add` is the newer alias that
+/// mirrors pnpm/yarn/bun).
+///
+/// Recognised shapes (any of `npm` / `pnpm` / `yarn` / `bun` as the prefix):
+///
+/// ```text
+/// npm install <pkg>
+/// npm i @scope/pkg@1.2.3
+/// pnpm add owner/repo
+/// yarn add https://github.com/o/r.git#v1
+/// npm install --save-dev <pkg>      ← --save-dev dropped
+/// ```
+fn split_package_manager_cli(spec: &str) -> Option<String> {
+    // All four package managers share the verb vocabulary `install` /
+    // `i` / `add`; only the binary prefix differs.
+    const VERBS: &[&str] = &["install", "i", "add"];
+
+    let s = spec.trim();
+    let rest = s
+        .strip_prefix("npm ")
+        .or_else(|| s.strip_prefix("pnpm "))
+        .or_else(|| s.strip_prefix("yarn "))
+        .or_else(|| s.strip_prefix("bun "))?;
+
+    let mut saw_verb = false;
+    for token in rest.split_whitespace() {
+        if !saw_verb {
+            if VERBS.contains(&token) {
+                saw_verb = true;
+            }
+            // Anything before the verb (binary-prefix flags like
+            // `npm --silent install <pkg>`) is dropped.
+            continue;
+        }
+        // After the verb, take the first non-flag positional. Any flags
+        // before it (e.g. `npm i -D <pkg>`) are silently skipped.
+        if token.starts_with('-') {
+            continue;
+        }
+        return Some(token.to_string());
+    }
+    None
+}
+
 /// Split an npm spec into (name, optional pin). The last @ after the scope
 /// prefix separates the version; @scope/name@1.2.3 parses as (@scope/name,
 /// 1.2.3). Plain names pass through.
@@ -424,13 +546,31 @@ fn split_npm_spec(spec: &str) -> Result<(String, Option<String>), AppError> {
     }
 }
 
-/// Parse an install request into a PluginSpec. Accepts npm package names
-/// (with optional @version) and git URLs (https, git@, or owner/repo
-/// shorthand, with optional #tag).
+/// Parse an install request into a PluginSpec. Accepts:
+///   - the kernel's full `dsh plugin [--profile X] (add|install) <pkg>` CLI
+///     invocation (with the optional `--profile` / `-p` flag ignored — the
+///     shell always wires into the active profile);
+///   - npm package names with optional `@version` pin, including `@scope/name`;
+///   - git URLs (`https://…`, `git@…`, or `github.com/owner/name`);
+///   - bare `owner/repo` shorthand, with optional `#tag`.
 pub fn parse_spec(spec: &str) -> Result<PluginSpec, AppError> {
     let s = spec.trim().trim_end_matches('/');
     if s.is_empty() || s.len() > 500 {
         return Err(AppError::Plugin("安装地址为空或过长".into()));
+    }
+    // `dsh plugin ... add <pkg>` first: copy-pasteable from kernel docs
+    // and ChatGPT suggestions. The helper pulls the package spec out and
+    // recurses so every downstream branch (npm / git / owner-repo) keeps
+    // a single source of truth.
+    if let Some((_profile, pkg)) = split_dsh_plugin_cli(s) {
+        return parse_spec(&pkg);
+    }
+    // Standard package-manager install syntax (`npm install <pkg>`,
+    // `pnpm add <pkg>`, `yarn add <pkg>`, `bun add <pkg>`). Same
+    // recursion — flags are dropped, the extracted spec goes through
+    // the same npm / git / owner-repo pipeline.
+    if let Some(pkg) = split_package_manager_cli(s) {
+        return parse_spec(&pkg);
     }
     if s.starts_with("git@") || s.contains("://") || s.contains("github.com/") {
         // git 来源：[url][#tag]
@@ -465,15 +605,28 @@ pub fn parse_spec(spec: &str) -> Result<PluginSpec, AppError> {
     }
     // owner/repo 简写：非 npm 样式（不含 @ 且含斜杠）按 GitHub 仓库处理
     if s.contains('/') && !s.starts_with('@') {
-        let github = format!("https://github.com/{s}.git");
-        let id = id_for_name(s)?;
+        // 同样的 #tag 切分逻辑，让 `owner/repo#v1.2.3` 这种简写也能
+        // 落到 fetch_git 的 tag 路径，而不是把 #tag 拼进 URL 然后
+        // git ls-remote 永远拿不到。
+        let (repo_path, pin) = match s.split_once('#') {
+            Some((repo, tag)) if !repo.is_empty() && !tag.is_empty() => {
+                (repo, Some(tag.to_string()))
+            }
+            _ => (s, None),
+        };
+        let github = format!("https://github.com/{repo_path}.git");
+        let id = id_for_name(repo_path)?;
         return Ok(PluginSpec {
             origin: "git".into(),
             source: github,
-            pin: None,
+            pin,
             id,
-            name: s.rsplit('/').next().unwrap_or(s).to_string(),
-            repo_url: Some(format!("https://github.com/{s}")),
+            name: repo_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(repo_path)
+                .to_string(),
+            repo_url: Some(format!("https://github.com/{repo_path}")),
         });
     }
     // npm 来源
@@ -730,13 +883,15 @@ fn fetch_into_store(
     fs::create_dir_all(&store).map_err(|e| AppError::Io(e.to_string()))?;
     let tmp =
         new_staging_dir(&store, TMP_PREFIX, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
-    // `tmp` is the only place we stamp the marker pre-rename. It gives
-    // a leftover in-flight dir an identity for `reconcile_store` if the
-    // shell crashes during fetch or validation, and the marker travels
-    // with the contents when we rename `tmp → new` later in this
-    // function, so `new` picks it up without us having to write to the
-    // rename target (which would make it non-empty and break Windows).
-    stamp_id_marker(&tmp, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
+    // Stamping the `.dsh-id` marker must wait until AFTER fetch_* returns:
+    // `git clone` requires an empty destination dir and aborts with
+    // "destination path '...' already exists and is not an empty directory"
+    // when the marker file is present at fetch time. The npm flow's tarball
+    // extraction would happily overwrite the marker anyway, so stamping
+    // pre-fetch only ever worked for npm by accident. Stamping here — once
+    // the staged tree is on disk and validated-empty-by-fetch — still gives
+    // `reconcile_store` the identity it needs during validation/publish,
+    // and the marker travels with the contents when we rename `tmp → new`.
 
     let version = match spec.origin.as_str() {
         "npm" => fetch_npm(spec, &tmp, on_progress),
@@ -750,6 +905,7 @@ fn fetch_into_store(
             return Err(e);
         }
     };
+    stamp_id_marker(&tmp, &spec.id).map_err(|e| AppError::Io(e.to_string()))?;
 
     on_progress("正在校验插件是否符合 dsh 规范");
     if let Err(e) = validate_plugin(&tmp) {
@@ -971,6 +1127,34 @@ pub fn reconcile_store(data_dir: &Path) {
     }
 }
 
+/// Resolve the version a plugin install should pin to, given the npm doc
+/// and the user-supplied pin (or `None` for "give me whatever the
+/// package's `latest` dist-tag points at"). Returns the resolved version
+/// string plus the label that should appear in error messages when the
+/// resolution yields an empty string.
+///
+/// Dist-tag resolution rule:
+/// - `pin = None` → look up `dist-tags.latest`, fall back to "" if absent
+/// - `pin = Some(tag)` where `tag` matches a dist-tag → use that tag's version
+/// - `pin = Some(ver)` where `ver` doesn't match a dist-tag → use the pin
+///   as a literal semver string (the caller will surface
+///   `versions[ver]` lookup failures with a clear error)
+fn resolve_npm_version(doc: &NpmDoc, pin: Option<&str>) -> (String, String) {
+    match pin {
+        Some(tag) => (
+            doc.dist_tags
+                .get(tag)
+                .cloned()
+                .unwrap_or_else(|| tag.to_string()),
+            tag.to_string(),
+        ),
+        None => (
+            doc.dist_tags.get("latest").cloned().unwrap_or_default(),
+            "latest".to_string(),
+        ),
+    }
+}
+
 fn fetch_npm(
     spec: &PluginSpec,
     dest: &Path,
@@ -979,13 +1163,20 @@ fn fetch_npm(
     on_progress(&format!("正在查询 npm registry：{}", spec.source));
     let doc =
         fetch_npm_doc(&spec.source).map_err(|e| AppError::Plugin(format!("查询 npm 失败：{e}")))?;
-    let version = spec
-        .pin
-        .clone()
-        .unwrap_or_else(|| doc.dist_tags.get("latest").cloned().unwrap_or_default());
+    // Resolve the requested version through `dist-tags` first so a
+    // pin like `@latest` (or `@next`, `@beta`) lands on the actual
+    // semver string `versions` is keyed by. Without this hop the
+    // literal `"latest"` is used as a `versions` key, the lookup
+    // returns `None`, and the user sees
+    // 「npm 上 @linxin666/dsh-liangshen@latest 没有可下载的 tarball」
+    // even though the package and its latest tarball both exist on
+    // the registry. A pin that doesn't match any dist-tag falls
+    // through unchanged so literal semver pins like `@1.2.3` still
+    // hit `versions` directly.
+    let (version, pin_label) = resolve_npm_version(&doc, spec.pin.as_deref());
     if version.is_empty() {
         return Err(AppError::Plugin(format!(
-            "npm 上找不到包 {} 或其 latest 标记",
+            "npm 上找不到包 {} 或其 {pin_label} 标记",
             spec.source
         )));
     }
@@ -1065,18 +1256,53 @@ fn fetch_git(
     if let Some(tag) = &branch {
         cmd.arg("--branch").arg(tag);
     }
-    let status = quiet(&mut cmd)
+    // stderr 是 git 唯一的诊断输出（"Repository not found"、
+    // "could not resolve host"、"authentication failed"、"SSL certificate
+    // problem"…）。早期实现把它和 stdout 都吞掉，导致失败时 UI 只能
+    // 显示无意义的 "exit code 128"，用户根本看不出是仓库不存在、网络
+    // 不通、还是权限问题。这里改成 piped；错误时优先挑出 fatal/error
+    // 行（"Cloning into 'X'..." 是首行纯提示，紧跟其后的 fatal: 才是
+    // 真正原因；某些情况下 git 还会在 stdout 上吐诊断信息，一并捕获）。
+    let output = quiet(&mut cmd)
         .arg(&spec.source)
         .arg(dest)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|e| AppError::Io(format!("无法运行 git：{e}")))?;
-    if !status.success() {
-        return Err(AppError::Plugin(format!(
-            "git clone 失败（退出码 {:?}），请检查地址与网络",
-            status.code()
-        )));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 优先反向查找 "fatal:" / "error:" 行；找不到就退回到最后一行
+        // 非空 stderr，再退回 "，请检查地址与网络" 兜底文案。
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|l| {
+                let t = l.trim_start();
+                t.starts_with("fatal:") || t.starts_with("error:")
+            })
+            .or_else(|| stderr.lines().rev().find(|l| !l.trim().is_empty()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let stdout_tail = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let code = output.status.code();
+        let mut msg = format!("git clone 失败（退出码 {:?}）", code);
+        if !detail.is_empty() {
+            msg.push_str(&format!("：{detail}"));
+        } else if !stdout_tail.is_empty() {
+            msg.push_str(&format!("：{stdout_tail}"));
+        } else {
+            msg.push_str("，请检查地址与网络");
+        }
+        return Err(AppError::Plugin(msg));
     }
     build_git_plugin(dest, pnpm_exe, on_progress)?;
     if let Some(tag) = branch {
@@ -1818,9 +2044,12 @@ struct HubRaw {
     /// Description.
     #[serde(default)]
     d: String,
-    /// GitHub repo `owner/name`.
-    #[serde(default)]
-    r: String,
+    /// Repo reference. Accepts both the shorthand `"owner/repo"` and the
+    /// detailed `{ "repo": "owner/repo", "npmPackage": "pkg" }` form; an
+    /// entry with both indicates the author ships an npm distribution
+    /// alongside the source repo and the catalog should install from npm.
+    #[serde(default, deserialize_with = "deserialize_hub_repo")]
+    r: HubRepo,
     /// Verification state; `verified` means manually reviewed.
     #[serde(default)]
     v: String,
@@ -1835,12 +2064,89 @@ struct HubRaw {
     fk: u64,
 }
 
+/// Repo reference from a hub entry. Either the bare `owner/repo` shorthand
+/// or the detailed `{ repo, npmPackage }` object. Empty / missing fields
+/// resolve to `None` so downstream code never sees a placeholder string it
+/// has to filter out.
+#[derive(Debug, Default, Clone)]
+struct HubRepo {
+    repo: Option<String>,
+    npm_package: Option<String>,
+}
+
+impl HubRepo {
+    fn repo(&self) -> Option<&str> {
+        self.repo.as_deref().filter(|s| !s.is_empty())
+    }
+    fn npm_package(&self) -> Option<&str> {
+        self.npm_package.as_deref().filter(|s| !s.is_empty())
+    }
+}
+
+/// Deserialize `r` from either a JSON string or `{ repo, npmPackage }`
+/// object. Anything else (null, number, …) collapses to an empty
+/// `HubRepo`, the same shape the field takes when the JSON omits it.
+///
+/// The hub feed switched a majority of entries to the detailed form when
+/// authors started publishing npm distributions alongside the source repo.
+/// The previous `r: String` deserializer rejected those entries wholesale,
+/// so a single detailed entry caused `Vec<HubRaw>::from_str` to fail for
+/// the whole array — the catalog then silently fell back to the much
+/// smaller reference market. Accepting both shapes here is what makes
+/// hub-only plugins surface in the plugin center at all.
+fn deserialize_hub_repo<'de, D>(de: D) -> Result<HubRepo, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(de)?;
+    match value {
+        serde_json::Value::Null => Ok(HubRepo::default()),
+        serde_json::Value::String(s) => Ok(HubRepo {
+            repo: (!s.is_empty()).then_some(s),
+            npm_package: None,
+        }),
+        serde_json::Value::Object(_) => {
+            #[derive(Deserialize)]
+            struct Detail {
+                #[serde(default)]
+                repo: String,
+                #[serde(default, rename = "npmPackage")]
+                npm_package: String,
+            }
+            let d: Detail = serde_json::from_value(value).map_err(Error::custom)?;
+            Ok(HubRepo {
+                repo: (!d.repo.is_empty()).then_some(d.repo),
+                npm_package: (!d.npm_package.is_empty()).then_some(d.npm_package),
+            })
+        }
+        _ => Err(Error::custom(
+            "`r` must be a string or { repo, npmPackage } object",
+        )),
+    }
+}
+
 impl HubRaw {
-    /// Normalize a hub entry to the shared catalog item. The hub's official
-    /// install path is git (`dsh plugin add github:owner/repo`), so entries
-    /// with a repo install from git; repo-less entries fall back to npm.
+    /// Normalize a hub entry to the shared catalog item. The hub feed
+    /// distinguishes four install paths, picked here in priority order:
+    ///
+    /// 1. `npmPackage` set → install from npm (author-published package,
+    ///    no compile step; preferred when the author ships one).
+    /// 2. `repo` set → install from the GitHub repo via `git clone`.
+    /// 3. `repo` missing/empty but `o` + `n` both populated → fall back
+    ///    to `github.com/{o}/{n}.git`. The hub has dozens of these — the
+    ///    author published the GitHub repo but left the `r` manifest
+    ///    field blank, so without this fallback `parse_spec` would route
+    ///    the install to npm with the display name, hit a 404, and leave
+    ///    the user with the misleading 「查询 npm 失败：404」 error.
+    /// 4. last-ditch → npm with the display name (legacy fallback for
+    ///    genuinely npm-only entries that never filled in `r`).
+    ///
+    /// The catalog UI surfaces the chosen origin on each card so the user
+    /// sees whether an 「安装」 button triggers an npm or git fetch.
     fn into_item(self) -> CatalogItem {
-        let repo = (!self.r.is_empty()).then_some(self.r.clone());
+        let repo = self.r.repo().map(str::to_string);
+        let npm_package = self.r.npm_package().map(str::to_string);
         let detail_url = if !self.o.is_empty() && !self.s.is_empty() {
             format!("https://dsh-plugin.org/zh/plugins/{}/{}", self.o, self.s)
         } else {
@@ -1848,9 +2154,17 @@ impl HubRaw {
                 .map(|r| format!("https://github.com/{r}"))
                 .unwrap_or_default()
         };
-        let (origin, spec) = match &repo {
-            Some(r) => ("git", format!("https://github.com/{r}.git")),
-            None => ("npm", self.n.clone()),
+        let (origin, spec) = if let Some(pkg) = &npm_package {
+            ("npm", pkg.clone())
+        } else if let Some(r) = &repo {
+            ("git", format!("https://github.com/{r}.git"))
+        } else if !self.o.is_empty() && !self.n.is_empty() {
+            (
+                "git",
+                format!("https://github.com/{}/{}.git", self.o, self.n),
+            )
+        } else {
+            ("npm", self.n.clone())
         };
         let id = if self.s.is_empty() {
             self.n.clone()
@@ -1938,10 +2252,25 @@ fn from_market_raw(raw: CatalogRaw) -> CatalogItem {
     }
 }
 
+/// Drop catalog entries the plugin center should not surface. The UI
+/// frames npm install as the canonical path (placeholder reads
+/// `npm i @scope/pkg …`), and the manual-install flow also resolves
+/// `npm i`/`pnpm add`/`yarn add`/`bun add` natively — entries with no
+/// npm package are therefore un-installable through the center's UI.
+/// They are still reachable through the manual install input (where
+/// `owner/repo` / git URL / dsh plugin CLI work) but the catalog
+/// should not list them, otherwise every 「安装」 button on those
+/// rows would 404 against the npm registry.
+fn filter_npm_origin(items: Vec<CatalogItem>) -> Vec<CatalogItem> {
+    items.into_iter().filter(|i| i.origin == "npm").collect()
+}
+
 /// Fetch the community catalog, caching the normalized items for
 /// CATALOG_TTL_SECS (`force` bypasses the cache). The dsh-plugin.org hub is
 /// the primary source; the reference market listing is the fallback when the
-/// hub is unreachable.
+/// hub is unreachable. The cached payload is always filtered to npm-origin
+/// entries so a stale cache written before this filter was introduced does
+/// not leak git-only rows into the plugin center on first read.
 fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, String> {
     let cache = data_dir.join(CATALOG_CACHE_FILE);
     let fresh = !force
@@ -1953,7 +2282,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
     if fresh {
         if let Ok(text) = fs::read_to_string(&cache) {
             if let Ok(items) = serde_json::from_str::<Vec<CatalogItem>>(&text) {
-                return Ok(items);
+                return Ok(filter_npm_origin(items));
             }
         }
     }
@@ -1971,6 +2300,7 @@ fn fetch_catalog(data_dir: &Path, force: bool) -> Result<Vec<CatalogItem>, Strin
             doc.items.into_iter().map(from_market_raw).collect()
         }
     };
+    let items = filter_npm_origin(items);
     if fs::create_dir_all(data_dir).is_ok() {
         if let Ok(text) = serde_json::to_string(&items) {
             let _ = fs::write(&cache, text);
@@ -2392,6 +2722,164 @@ mod tests {
     }
 
     #[test]
+    fn filter_npm_origin_drops_git_only_entries() {
+        // The plugin center only surfaces entries that the 「安装」
+        // button can actually pull from npm. Git-only entries are
+        // still reachable through the manual-install input (which
+        // accepts owner/repo / git URL / dsh plugin CLI), but listing
+        // them in the catalog would surface 404s the moment the user
+        // clicks install.
+        let mk = |id: &str, name: &str, origin: &str, spec: &str, repo: Option<&str>| CatalogItem {
+            id: id.into(),
+            name: name.into(),
+            kind: String::new(),
+            description: String::new(),
+            stars: 0,
+            forks: 0,
+            downloads: 0,
+            verified: false,
+            repo: repo.map(str::to_string),
+            spec: spec.into(),
+            origin: origin.into(),
+            category: String::new(),
+            version: String::new(),
+            tags: vec![],
+            updated: String::new(),
+            detail_url: String::new(),
+        };
+        let npm_only = mk("a", "a", "npm", "@scope/a", Some("owner/a"));
+        let git_only = mk("b", "b", "git", "https://github.com/owner/b.git", None);
+
+        let out = filter_npm_origin(vec![npm_only.clone(), git_only]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "a");
+        assert_eq!(out[0].origin, "npm");
+        // Empty input is a no-op.
+        assert!(filter_npm_origin(vec![]).is_empty());
+        // All-npm passes through unchanged.
+        assert_eq!(filter_npm_origin(vec![npm_only.clone(), npm_only]).len(), 2);
+    }
+
+    #[test]
+    fn resolves_npm_version_through_dist_tags() {
+        // Pinning to "latest" should hop through `dist-tags.latest` to
+        // the actual semver the registry publishes — without this hop
+        // the literal `"latest"` is used as a `versions` key and the
+        // user sees "没有可下载的 tarball" even though the package
+        // and its tarball both exist (the bug @linxin666/dsh-liangshen
+        // hit on the user's machine).
+        let doc: NpmDoc = serde_json::from_str(
+            r#"{
+                "dist-tags": {"latest": "0.3.2", "next": "1.0.0-rc.1"},
+                "versions": {
+                    "0.3.2": {},
+                    "1.0.0-rc.1": {},
+                    "0.1.0": {}
+                }
+            }"#,
+        )
+        .expect("npm doc");
+        assert_eq!(
+            resolve_npm_version(&doc, None),
+            ("0.3.2".into(), "latest".into())
+        );
+        assert_eq!(
+            resolve_npm_version(&doc, Some("latest")),
+            ("0.3.2".into(), "latest".into())
+        );
+        assert_eq!(
+            resolve_npm_version(&doc, Some("next")),
+            ("1.0.0-rc.1".into(), "next".into())
+        );
+        // Literal semver pin: keep the pin unchanged so the caller's
+        // `versions[<pin>]` lookup surfaces a precise error.
+        assert_eq!(
+            resolve_npm_version(&doc, Some("1.0.0-rc.1")),
+            ("1.0.0-rc.1".into(), "1.0.0-rc.1".into())
+        );
+        assert_eq!(
+            resolve_npm_version(&doc, Some("9.9.9")),
+            ("9.9.9".into(), "9.9.9".into())
+        );
+
+        // No `dist-tags.latest`: `None` returns empty, error surfaces
+        // "找不到包 … 或其 latest 标记".
+        let doc: NpmDoc = serde_json::from_str(r#"{"versions": {"1.0.0": {}}}"#).unwrap();
+        assert_eq!(
+            resolve_npm_version(&doc, None),
+            ("".into(), "latest".into())
+        );
+    }
+
+    #[test]
+    fn parses_package_manager_install_cli() {
+        // The exact form the user pastes from docs: `npm i @scope/pkg@v`.
+        let spec = parse_spec("npm i @linxin666/dsh-liangshen").unwrap();
+        assert_eq!(spec.origin, "npm");
+        assert_eq!(spec.source, "@linxin666/dsh-liangshen");
+        assert_eq!(spec.pin, None);
+
+        // `install` and `add` verbs, all four package-manager prefixes.
+        let spec = parse_spec("npm install @scope/pkg@1.2.3").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+        assert_eq!(spec.pin.as_deref(), Some("1.2.3"));
+        assert_eq!(parse_spec("pnpm add owner/repo").unwrap().origin, "git");
+        assert_eq!(parse_spec("yarn add owner/repo").unwrap().origin, "git");
+        assert_eq!(
+            parse_spec("bun add @scope/pkg@latest").unwrap().source,
+            "@scope/pkg"
+        );
+
+        // Flags (`--save-dev`, `-D`) before the package spec are dropped
+        // silently. `npm i -D <pkg>` and `npm install --save-dev <pkg>`
+        // both reduce to the bare package spec.
+        let spec = parse_spec("npm i -D @scope/pkg@1.0.0").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+        let spec = parse_spec("npm install --save-dev @scope/pkg@1.0.0").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+
+        // `npm install` (no package spec) falls through to npm parsing
+        // and fails loudly on whitespace, so the user sees an actionable
+        // error instead of a silent no-op.
+        assert!(parse_spec("npm install").is_err());
+    }
+
+    #[test]
+    fn parses_dsh_plugin_cli_form() {
+        // Full `dsh plugin --profile X add <pkg>` form, the canonical
+        // command the kernel ships — users paste it from docs / chat
+        // suggestions; the shell must accept it verbatim.
+        let spec =
+            parse_spec("dsh plugin --profile web add @linxin666/dsh-liangshen@latest").unwrap();
+        assert_eq!(spec.origin, "npm");
+        assert_eq!(spec.source, "@linxin666/dsh-liangshen");
+        assert_eq!(spec.pin.as_deref(), Some("latest"));
+
+        // No `--profile` flag: still parse the package spec.
+        let spec = parse_spec("dsh plugin add @linxin666/dsh-liangshen@latest").unwrap();
+        assert_eq!(spec.origin, "npm");
+        assert_eq!(spec.source, "@linxin666/dsh-liangshen");
+        assert_eq!(spec.pin.as_deref(), Some("latest"));
+
+        // `install` is an alias for `add` in the kernel CLI.
+        let spec = parse_spec("dsh plugin install @scope/pkg@1.2.3").unwrap();
+        assert_eq!(spec.source, "@scope/pkg");
+        assert_eq!(spec.pin.as_deref(), Some("1.2.3"));
+
+        // Short `-p` flag.
+        let spec = parse_spec("dsh plugin -p web add owner/repo#v1.0.0").unwrap();
+        assert_eq!(spec.origin, "git");
+        assert_eq!(spec.source, "https://github.com/owner/repo.git");
+        assert_eq!(spec.pin.as_deref(), Some("v1.0.0"));
+
+        // `dsh plugin … remove` / `update` / `list` are not install verbs;
+        // the manual-install UI must reject them so a pasted command
+        // can't accidentally uninstall a plugin.
+        assert!(parse_spec("dsh plugin remove @scope/pkg").is_err());
+        assert!(parse_spec("dsh plugin list").is_err());
+    }
+
+    #[test]
     fn validate_plugin_checks_the_load_contract() {
         let home = TestHome::new();
         let dir = home.0.join("plugin");
@@ -2471,6 +2959,64 @@ mod tests {
         assert_eq!(item.origin, "npm");
         assert_eq!(item.spec, "pkg");
         assert!(!item.verified);
+    }
+
+    #[test]
+    fn hub_entry_with_npm_package_installs_from_npm() {
+        // Author ships an npm distribution alongside the GitHub repo; the
+        // catalog should pick the npm path so the UI's 「安装」 button
+        // installs the published tarball (404-able on npm, unlike a git
+        // clone of an arbitrary repo).
+        let raw: HubRaw = serde_json::from_str(
+            r#"{"s":"dsh-zhipu","n":"dsh-zhipu","r":{"repo":"fineven/dsh-zhipu","npmPackage":"dsh-zhipu"}}"#,
+        )
+        .expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "npm");
+        assert_eq!(item.spec, "dsh-zhipu");
+        assert_eq!(item.repo.as_deref(), Some("fineven/dsh-zhipu"));
+    }
+
+    #[test]
+    fn hub_entry_with_repo_object_no_npm_falls_back_to_git() {
+        // A detailed `r` without `npmPackage` should still install via
+        // git; the detailed form carries the same `repo` shorthand in
+        // object clothing, so the install path is unchanged.
+        let raw: HubRaw =
+            serde_json::from_str(r#"{"s":"plug","n":"plug","r":{"repo":"owner/plug"}}"#)
+                .expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "git");
+        assert_eq!(item.spec, "https://github.com/owner/plug.git");
+    }
+
+    #[test]
+    fn hub_entry_with_empty_repo_object_falls_back_to_npm_name() {
+        // A detailed `r` with neither field filled is treated the same
+        // as a missing `r` — npm install using the display name.
+        let raw: HubRaw =
+            serde_json::from_str(r#"{"s":"plug","n":"plug","r":{}}"#).expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "npm");
+        assert_eq!(item.spec, "plug");
+        assert!(item.repo.is_none());
+    }
+
+    #[test]
+    fn hub_entry_missing_repo_falls_back_to_owner_name_git() {
+        // Author published the GitHub repo but left `r` blank in the
+        // manifest. Without this fallback `parse_spec` would route the
+        // install to npm with the display name, hit a 404, and surface
+        // the misleading 「查询 npm 失败：404」 error the user just
+        // reported on `dsh-web-ui`. `o` + `n` give us enough to
+        // reconstruct the canonical github.com URL.
+        let raw: HubRaw =
+            serde_json::from_str(r#"{"s":"dsh-web-ui","o":"someone","n":"dsh-web-ui"}"#)
+                .expect("hub raw");
+        let item = raw.into_item();
+        assert_eq!(item.origin, "git");
+        assert_eq!(item.spec, "https://github.com/someone/dsh-web-ui.git");
+        assert!(item.repo.is_none());
     }
 
     #[test]

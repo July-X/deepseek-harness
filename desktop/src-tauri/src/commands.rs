@@ -36,6 +36,10 @@ pub struct AppState {
 pub struct StatusView {
     /// Version of the running shell itself (from tauri.conf.json).
     pub shell_version: String,
+    /// True in debug builds (`tauri dev`). The panel uses it to wash its
+    /// header column with the whale-eye red so the dev shell is visually
+    /// distinct from an installed release shell sharing the screen.
+    pub dev_build: bool,
     pub kernel: kernel::KernelStatus,
     pub node: node::NodeInfo,
     pub settings: settings::Settings,
@@ -82,6 +86,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         let node_info = cached_node(&state, &settings);
         StatusView {
             shell_version: app.package_info().version.to_string(),
+            dev_build: cfg!(debug_assertions),
             kernel: kernel_status,
             node: node_info,
             settings,
@@ -107,13 +112,20 @@ fn cached_node(state: &AppState, settings: &settings::Settings) -> node::NodeInf
 }
 
 #[tauri::command]
-pub fn detect_node(state: State<'_, AppState>) -> node::NodeInfo {
-    // Detection ignores any configured path: it reports what the environment
-    // has, so the UI can pre-fill the setting.
+pub async fn detect_node(state: State<'_, AppState>) -> Result<node::NodeInfo, String> {
+    // Detection ignores any configured path: it reports what the
+    // environment has, so the UI can pre-fill the setting. Resolving may
+    // spawn one child per environment candidate (PATH + nvm-managed
+    // installs + system locations) — keep those process spawns off the
+    // Tauri main thread.
     let data_dir = state.data_dir.clone();
-    let mut s = settings::load(&data_dir);
-    s.node_path = None;
-    node::resolve(&s)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = settings::load(&data_dir);
+        s.node_path = None;
+        node::resolve(&s)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -286,16 +298,32 @@ pub async fn install_kernel(
     let (node_path, pnpm_exe) = promise_pnpm(&data_dir, &node_info, |msg| {
         let _ = on_event.send(msg.to_string());
     })?;
+    // `node_dir` is the directory of the validated `node` executable.
+    // Install children need it on PATH so pnpm's `#!/usr/bin/env node`
+    // shebang and any lifecycle script that shells out to `node` resolve
+    // it even when the GUI process inherited a launchd-only PATH (macOS
+    // .app bundles) — the common case for nvm-managed installs.
+    let node_dir = node_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
     // Clone the values the closure needs so we still own `data_dir` and
     // `version` for the post-install `set_active` / auto-start steps.
     let dir_for_thread = data_dir.clone();
+    let node_dir_for_thread = node_dir;
     let pnpm_ex = pnpm_exe;
     let version_for_thread = version.clone();
     let send = on_event.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        kernel::install_version(&dir_for_thread, &pnpm_ex, &version_for_thread, |msg| {
-            let _ = send.send(msg.to_string());
-        })
+        kernel::install_version(
+            &dir_for_thread,
+            &node_dir_for_thread,
+            &pnpm_ex,
+            &version_for_thread,
+            |msg| {
+                let _ = send.send(msg.to_string());
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -487,7 +515,10 @@ pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
 /// appends a `<style>` node with `!important` rules so the shell
 /// override wins regardless of which kernel version is running and
 /// regardless of load order between this script and the workbench's
-/// own stylesheets.
+/// own stylesheets. A second injected script (`pullstring-launcher.js`)
+/// renders a pull-string lamp floating at the workbench's top-left edge;
+/// pulling it invokes [`focus_main_shell`] to raise the management window
+/// over the current desktop.
 #[tauri::command]
 pub fn open_harness(app: AppHandle) -> Result<(), String> {
     let data_dir = crate::kernel::data_dir(&app);
@@ -513,6 +544,7 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
                 .inner_size(1280.0, 840.0)
                 .closable(false)
                 .initialization_script(include_str!("titlebar-pulse.js"))
+                .initialization_script(include_str!("pullstring-launcher.js"))
                 .build();
             if let Err(e) = result {
                 eprintln!("dsh-desktop: failed to open harness window: {e}");
@@ -525,6 +557,104 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// Raise the shell's main management window above the current desktop.
+///
+/// Invoked from the pull-string lamp injected into the workbench webview
+/// (`pullstring-launcher.js`) over `window.__TAURI__.core.invoke`, so it
+/// works regardless of which kernel version the workbench is running
+/// against. `show` + `unminimize` recover the window from a hidden or
+/// minimized state before `set_focus` moves it to the foreground; the
+/// window is configured non-resizable and always exists (tauri.conf.json),
+/// so a missing window is an internal error worth surfacing to the
+/// webview's console.
+///
+/// The always-on-top toggle before `set_focus` is the Windows
+/// foreground-lock workaround: `SetForegroundWindow` is silently ignored
+/// when the OS decides the process may not steal foreground (focus
+/// arriving over IPC rather than a direct input event), leaving the panel
+/// raised-but-behind. Pinning the window topmost and immediately releasing
+/// it forces it to the head of the normal z-order regardless; on
+/// macOS/Linux the toggle is a harmless no-op raise.
+///
+/// `x`/`y` are the click's screen coordinates in CSS pixels
+/// (`MouseEvent.screenX/Y`); when present the panel is first repositioned
+/// next to the click so the user never has to hunt for it on another
+/// monitor. They are optional so an older injected script that invokes
+/// without arguments still raises the window in place.
+#[tauri::command]
+pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("主壳窗口不存在（label: main）".to_string());
+    };
+    if let (Some(x), Some(y)) = (x, y) {
+        reposition_near(&app, &window, x, y);
+    }
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_always_on_top(false);
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+/// Tear down the management window after the user confirmed a full quit
+/// from the request-quit-confirm prompt. The window-close interceptor in
+/// `lib::run` calls `prevent_close()` first so this `destroy()` is the
+/// only thing that lets the OS X button actually close the panel; the
+/// `RunEvent::Exit` handler then reaps any kernel leftovers via pid file.
+#[tauri::command]
+pub fn confirm_close_shell(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("主壳窗口不存在（label: main）".to_string());
+    };
+    window.destroy().map_err(|e| e.to_string())
+}
+
+/// Move `window` so its top-left corner sits just below-right of the
+/// logical screen point `(x, y)`, clamped inside the monitor containing
+/// the point so the panel never lands off-screen. Monitor geometry is
+/// converted to logical units per monitor (`position`/`size` are physical,
+/// `scale_factor` bridges the two); when no monitor contains the point —
+/// stale coordinates after a display change — the primary monitor (or the
+/// first enumerated one) is used instead.
+fn reposition_near(app: &AppHandle, window: &tauri::WebviewWindow, x: f64, y: f64) {
+    let Ok(monitors) = app.available_monitors() else {
+        return;
+    };
+    let containing = monitors.iter().find(|m| {
+        let s = m.scale_factor();
+        let p = m.position();
+        let sz = m.size();
+        x >= p.x as f64 / s
+            && x < (p.x as f64 + sz.width as f64) / s
+            && y >= p.y as f64 / s
+            && y < (p.y as f64 + sz.height as f64) / s
+    });
+    let monitor = match containing.cloned().or_else(|| {
+        app.primary_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| monitors.first().cloned())
+    }) {
+        Some(m) => m,
+        None => return,
+    };
+    let s = monitor.scale_factor();
+    let p = monitor.position();
+    let sz = monitor.size();
+    let (mx, my) = (p.x as f64 / s, p.y as f64 / s);
+    let (mw, mh) = (sz.width as f64 / s, sz.height as f64 / s);
+    let win = window
+        .outer_size()
+        .unwrap_or(tauri::PhysicalSize::new(480, 800));
+    let (ww, wh) = (win.width as f64 / s, win.height as f64 / s);
+    // +12px keeps the panel clear of the cursor itself; the `.max(m*)`
+    // guards against windows wider/taller than the monitor.
+    let nx = (x + 12.0).clamp(mx, (mx + mw - ww).max(mx));
+    let ny = (y + 12.0).clamp(my, (my + mh - wh).max(my));
+    let _ = window.set_position(tauri::LogicalPosition::new(nx, ny));
+}
+
 // --- plugins ---------------------------------------------------------------
 
 /// Snapshot of the plugin store and per-kernel materialization state.
@@ -570,13 +700,20 @@ async fn run_plugin_command(
 
 /// Install a community plugin (npm package name or git URL) into the
 /// central store, materialize it into every kernel, and wire the profile.
+///
+/// `mode` is the materialization mode at install time. It is optional so
+/// callers do not have to pick at install time — the Installed list owns
+/// the mode-toggle surface (`plugin_set_mode`), and `plugins::install`
+/// already falls back to `link` when the caller passes anything other
+/// than `copy`.
 #[tauri::command]
 pub async fn plugin_install(
     app: AppHandle,
     spec: String,
-    mode: String,
+    mode: Option<String>,
     on_event: Channel<String>,
 ) -> Result<(), String> {
+    let mode = mode.unwrap_or_else(|| String::from("link"));
     run_plugin_command(
         app,
         on_event,

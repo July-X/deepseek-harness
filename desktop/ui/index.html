@@ -103,6 +103,11 @@
     <symbol id="i-folder" viewBox="0 0 24 24">
       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
     </symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24">
+      <path d="M12 3 2 21h20L12 3z" />
+      <line x1="12" y1="10" x2="12" y2="14" />
+      <line x1="12" y1="17" x2="12" y2="17" />
+    </symbol>
   </svg>
 
   <div class="layout">
@@ -140,11 +145,38 @@
           <svg class="icon"><use href="#i-sliders" /></svg><span>设置</span>
         </button>
       </nav>
+      <div class="safety-notice" role="note" title="第三方插件由社区提供，本桌面端不对其代码行为与安全性负责，请自行甄别后再安装。">
+        <svg class="icon" aria-hidden="true"><use href="#i-alert" /></svg>
+        <p>第三方插件由社区提供，本工具不对其安全性负责，请自行甄别。</p>
+      </div>
     </aside>
 
     <main>
       <!-- 概览：当前内核状态与启停操作 -->
       <section class="panel" id="panelOverview">
+        <!-- 首次启动引导：未安装任何内核时显示，比 status 卡片底部的 hint
+             更醒目，让新用户一眼看出下一步该做什么。两个按钮对应两条路径：
+             「选择并安装内核」跳到版本页并自动拉取发布列表，
+             「安装最新版本」直接拉取并安装当前最新版。 -->
+        <div id="firstRunCallout" class="callout callout-firstrun hidden" role="alert">
+          <div class="callout-icon" aria-hidden="true">
+            <svg class="icon"><use href="#i-alert" /></svg>
+          </div>
+          <div class="callout-body">
+            <h3>欢迎使用 DeepSeek Harness 桌面端</h3>
+            <p>当前尚未安装任何 dsh 内核版本。请先选择一个版本安装，再启动工作台。</p>
+            <div class="btn-row">
+              <button id="btnFirstRunPick" type="button">
+                <svg class="icon"><use href="#i-layers" /></svg>
+                <span>选择并安装内核</span>
+              </button>
+              <button id="btnFirstRunLatest" type="button" class="ghost">
+                <svg class="icon"><use href="#i-download" /></svg>
+                <span>安装最新版本</span>
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="card" id="cardStatus">
           <h2>当前内核</h2>
           <dl class="kv">
@@ -243,16 +275,14 @@
           <div id="pluginList" class="installed-list">
             <p class="muted">尚未安装任何插件。</p>
           </div>
-          <h3>手动安装</h3>
+          <h3 class="section-divider">手动安装</h3>
           <div class="install-row">
-            <input id="pluginSpec" type="text" placeholder="npm 包名（@scope/name）或 GitHub 仓库 URL" spellcheck="false" />
-            <select id="pluginMode" title="物化模式">
-              <option value="link">链接（默认）</option>
-              <option value="copy">复制</option>
-            </select>
-            <button id="btnPluginInstall" type="button">
-              <svg class="icon"><use href="#i-download" /></svg><span>安装</span>
-            </button>
+            <div class="input-with-action">
+              <input id="pluginSpec" type="text" placeholder="npm i @scope/pkg · 也支持 owner/repo、dsh add" spellcheck="false" />
+              <!-- 视觉提示，不是可点击的按钮：↵ 让用户知道「回车开始安装」，
+                   而不要把下载 icon 误导成「点这里」。 -->
+              <span class="input-hint" aria-hidden="true" title="按 Enter 开始安装">↵</span>
+            </div>
           </div>
         </div>
 

@@ -1,0 +1,45 @@
+{
+  "permission": [
+    {
+      "identifier": "allow-focus-main-shell",
+      "description": "Allow raising the shell's main management window. Granted to the workbench webview (remote http://127.0.0.1 origin) so the injected pull-string launcher can bring the panel to the foreground; tauri-build only exposes app commands to capabilities through an app-level permission like this one.",
+      "commands": {
+        "allow": ["focus_main_shell"]
+      }
+    },
+    {
+      "identifier": "allow-local-commands",
+      "description": "Allow every app command from the shell's own local windows (the management panel). Defining ANY app-level permission flips Tauri from 'app commands are open to local windows' to 'app commands require an explicit grant', so this permission restores the pre-existing behavior for the local UI. Maintenance: every command added to `tauri::generate_handler!` in lib.rs must be listed here, or its invoke from the panel fails with 'not allowed. Command not found'.",
+      "commands": {
+        "allow": [
+          "get_status",
+          "detect_node",
+          "save_settings",
+          "get_kernel_log",
+          "list_log_files",
+          "read_log_file",
+          "open_data_dir",
+          "check_shell_update",
+          "install_shell_update",
+          "fetch_releases",
+          "install_kernel",
+          "activate_version",
+          "remove_version",
+          "start_kernel",
+          "stop_kernel",
+          "open_harness",
+          "focus_main_shell",
+          "plugin_status",
+          "plugin_install",
+          "plugin_update",
+          "plugin_uninstall",
+          "plugin_sync",
+          "plugin_set_mode",
+          "plugin_check_updates",
+          "plugin_catalog",
+          "confirm_close_shell"
+        ]
+      }
+    }
+  ]
+}

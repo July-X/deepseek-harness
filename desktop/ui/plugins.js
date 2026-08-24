@@ -383,13 +383,15 @@ function installPlugin(spec) {
   const fromCatalog = !!(spec || '').trim();
   const raw = (spec || '').trim() || input.value.trim();
   if (!raw) {
-    toast('请先填写 npm 包名或仓库地址', 4000);
+    toast('请先填写仓库地址或 npm 包名', 4000);
     return;
   }
   if (!fromCatalog) {
     input.value = '';
   }
-  const mode = $('pluginMode').value;
+  // 物化模式默认走链接（plugin_install 的 mode 缺省回退到 link）；
+  // 用户可在「已安装」列表的「切换为复制 / 切换为链接」按钮上调整
+  // （setPluginMode → plugin_set_mode），那里才是模式权威入口。
   return withPluginProgress(
     {
       cmd: 'plugin_install',
@@ -397,7 +399,7 @@ function installPlugin(spec) {
       done: '插件 ' + raw + ' 已安装（重启内核后生效）',
       fail: '安装失败：' + raw
     },
-    (channel) => ({ spec: raw, mode, onEvent: channel })
+    (channel) => ({ spec: raw, onEvent: channel })
   );
 }
 
@@ -486,7 +488,6 @@ function openExternal(url) {
 
 // --- wiring ---------------------------------------------------------------
 
-$('btnPluginInstall').addEventListener('click', () => installPlugin(''));
 $('btnPluginCheck').addEventListener('click', () => checkPluginUpdates({ busy: true, toastOnUpdates: true }));
 $('btnPluginSync').addEventListener('click', syncPlugins);
 $('btnCatalogReload').addEventListener('click', () => loadCatalog(true));

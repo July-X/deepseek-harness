@@ -56,6 +56,17 @@ body {
   border-right: 1px solid var(--border);
 }
 
+/* Dev builds (`tauri dev`): wash the header column with a faint whale-eye
+   red (#ff2d30 from assets/whale-icon.svg) so the dev shell (desktop-dev,
+   port 3091) is distinguishable at a glance from an installed release
+   shell. A background-image layer tints whatever --bg-soft resolves to,
+   in both the wide and the narrow (column) layouts; the red is strongest
+   at the top edge and fades out downward. app.js toggles body.dev-build
+   from StatusView.dev_build. */
+body.dev-build .sidebar {
+  background-image: linear-gradient(to bottom, rgba(255, 45, 48, 0.16), rgba(255, 45, 48, 0));
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -109,6 +120,39 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* 安全免责提示：固定在 sidebar 底部，宽屏明显可见，
+   提醒用户第三方插件由社区提供，本工具不对其安全性负责。 */
+.safety-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: auto;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 10px;
+  background: rgba(251, 191, 36, 0.10);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.safety-notice .icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.safety-notice p {
+  margin: 0;
+  color: var(--text);
 }
 
 .menu-item {
@@ -427,6 +471,17 @@ pre::-webkit-scrollbar-thumb,
     padding: 6px 10px;
     font-size: 13px;
   }
+  /* 窄屏 chrome 栏：菜单用 margin-top: auto 沉底，安全提示
+     去掉 auto 后紧跟其后，自然落在菜单下面做横向条幅。 */
+  .safety-notice {
+    margin-top: 0;
+    padding: 8px 12px;
+    font-size: 11px;
+    align-items: center;
+  }
+  .safety-notice p {
+    line-height: 1.4;
+  }
   .status-pill {
     /* Now lives inside .brand; .brand is flex row at every width
        (the wide layout inherited from the default rule, the narrow
@@ -475,10 +530,12 @@ pre::-webkit-scrollbar-thumb,
     flex: 1 1 auto;
     justify-content: flex-end;
   }
-  /* install-row: at 480px the input + 2 selects + button row would
+  /* install-row: at 480px a row with input + selects + button can
      overflow. Let the input take the full first row, then the
-     selects + button share the second row with the button right-
-     aligned. The min-widths keep each select readable. */
+     remaining selects/buttons share the second row. The min-widths
+     keep each select readable. The manual install row (input + button)
+     collapses to two rows by the same rule; the catalog search row
+     keeps its selects. */
   .install-row {
     flex-wrap: wrap;
   }
@@ -673,6 +730,57 @@ input:focus {
   border-radius: 10px;
   padding: 10px 14px;
   margin-bottom: 12px;
+}
+
+/* First-run引导卡：未安装任何内核版本时高亮提示用户去安装。
+   比 .warning 更突出——使用强调色描边和左侧图标条，并在布局上
+   把按钮放到与说明文字同一区块，让「下一步」动作与上下文同屏可见。 */
+.callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  background: var(--card);
+  margin-bottom: 4px;
+}
+.callout-icon {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.16);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.callout-icon .icon {
+  width: 20px;
+  height: 20px;
+}
+.callout-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.callout-body h3 {
+  margin: 0 0 6px 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.callout-body p {
+  margin: 0 0 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.callout-body .btn-row {
+  margin: 0;
+}
+.callout-firstrun {
+  border-left-color: var(--accent);
 }
 
 .hidden {
@@ -1080,6 +1188,51 @@ button.danger.armed {
 .install-row input {
   flex: 1;
   min-width: 0;
+}
+
+/* 手动安装行：输入框撑满，按钮按内容自适应（更小） */
+.install-row-narrow input {
+  flex: 4 1 auto;
+}
+
+.install-row-narrow button {
+  flex: 0 0 auto;
+}
+
+/* 输入框右侧提示符：↵ 让用户知道「按 Enter 开始安装」，不是
+   可点击的按钮——按钮形状 + 下载 icon 会误导成「点这里」，
+   但安装入口只有 Enter。Enter 触发逻辑由 plugins.js 的 keydown
+   监听统一处理（installPlugin('')）。 */
+.input-with-action {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+}
+.input-with-action input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 36px;
+}
+.input-hint {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  line-height: 0;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 「手动安装」上方加一条与卡片内分割线同色的细线，
+   把已安装列表与手动安装输入区分隔。 */
+h3.section-divider {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
 }
 
 .install-row select {

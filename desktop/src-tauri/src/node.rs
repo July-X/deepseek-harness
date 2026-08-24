@@ -136,10 +136,20 @@ fn which_in_dir(name: &str, dir: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// Directories to scan when looking up a tool on PATH. Detection must see
+/// the same PATH the shell stamps onto spawned children
+/// (`crate::env::merged_path`): a GUI-launched Windows shell inherits only
+/// the system PATH, so tools installed into the user-level npm prefix
+/// (`%AppData%\npm`) are invisible to a raw `std::env::var_os("PATH")`
+/// scan even though the user can run them from any terminal. On other
+/// platforms the merged PATH mirrors the process PATH.
+fn path_dirs() -> impl Iterator<Item = PathBuf> {
+    std::env::split_paths(crate::env::merged_path())
+}
+
 /// Find `node` on the PATH.
 fn from_path() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
+    for dir in path_dirs() {
         let candidate = dir.join(exe_name("node"));
         if candidate.is_file() {
             return Some(candidate);
@@ -164,6 +174,279 @@ fn common_locations() -> Vec<PathBuf> {
     out
 }
 
+// --- nvm-managed installations ----------------------------------------------
+//
+// GUI shells launch with a minimal PATH (launchd on macOS, the Window
+// Station system PATH merged from `HKCU\Environment` on Windows — see
+// `crate::env`), so a Node managed by nvm is invisible to the PATH walk
+// even though it is exactly the runtime the user intends to use. nvm
+// keeps every installed version on disk in a predictable layout, so the
+// shell discovers them directly instead of depending on the inherited
+// environment:
+//
+// - nvm-sh (macOS/Linux): `$NVM_DIR` (default `~/.nvm`) with versions
+//   under `versions/node/<vX.Y.Z>/bin/node`; the preferred one recorded
+//   in `alias/default`, whose content may itself name another alias
+//   (`lts/hydrogen`) or a partial version (`22`).
+// - nvm-windows: `%NVM_HOME%` (default `%APPDATA%\nvm`) with versions
+//   under `vX.Y.Z\node.exe`; the version selected by `nvm use` is exposed
+//   as a directory junction named by `%NVM_SYMLINK%`.
+
+/// How many alias-file indirections [`resolve_alias`] follows before
+/// giving up. `default` → `lts/hydrogen` → `20.9.0` is the common depth;
+/// the cap only matters for hand-edited cyclic aliases, which end in a
+/// spec that matches no installed version and fall through to the
+/// newest-first scan.
+#[cfg(not(windows))]
+const ALIAS_MAX_HOPS: usize = 5;
+
+/// The nvm-sh root directory (`$NVM_DIR`, defaulting to `~/.nvm`) when it
+/// exists on disk.
+#[cfg(not(windows))]
+fn nvm_root() -> Option<PathBuf> {
+    let candidate = std::env::var_os("NVM_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::kernel::dirs_home().join(".nvm"));
+    candidate.is_dir().then_some(candidate)
+}
+
+/// Directories nvm-windows may keep versions in: `$NVM_HOME` when the
+/// environment carries it, plus the default `%APPDATA%\nvm` location. The
+/// GUI process frequently inherits neither variable (see `crate::env`),
+/// so the default keeps detection working without it.
+#[cfg(windows)]
+fn nvm_roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::var_os("NVM_HOME") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            out.push(p);
+        }
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let p = PathBuf::from(appdata).join("nvm");
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Resolve an nvm-sh alias to a concrete version spec by following the
+/// alias-file chain: `alias/<name>` may name another alias and ends at a
+/// version string, possibly partial (`22`). Returns the final spec without
+/// checking that any installed version matches it.
+#[cfg(not(windows))]
+fn resolve_alias(root: &Path, start: &str) -> Option<String> {
+    let mut spec = start.to_string();
+    for _ in 0..ALIAS_MAX_HOPS {
+        match fs::read_to_string(root.join("alias").join(&spec)) {
+            Ok(text) => {
+                let next = text.trim();
+                if next.is_empty() {
+                    return None;
+                }
+                spec = next.to_string();
+            }
+            // `spec` does not name another alias file, so it already is
+            // the concrete (possibly partial) version spec.
+            Err(_) => break,
+        }
+    }
+    let trimmed = spec.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Trim and strip the leading `v` from an alias-resolved version spec so
+/// comparisons against installed directory names share one form.
+fn normalize_spec(spec: Option<&str>) -> Option<String> {
+    let s = spec?.trim();
+    let s = s.strip_prefix('v').unwrap_or(s);
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// Render a parsed tuple back to the dotted form used for alias-spec
+/// comparison (`(22, 19, 0)` → `"22.19.0"`).
+fn format_version((major, minor, patch): (u32, u32, u32)) -> String {
+    format!("{major}.{minor}.{patch}")
+}
+
+/// Order discovered version-manager installations for probing.
+///
+/// The installation matching `default_spec` comes first — that is the
+/// version the user pinned with `nvm alias default`. Exact match wins,
+/// then the highest installed version the spec prefixes (`22` resolves to
+/// the newest v22.x.y), mirroring how nvm itself interprets partial specs.
+/// Remaining engine-compatible installations follow newest-first, so an
+/// unpinned machine still gets a usable Node. Installations whose declared
+/// version cannot satisfy the engines range are dropped entirely: probing
+/// them would only produce a rejection the caller renders better than a
+/// wasted child spawn.
+fn order_nvm_versions(
+    mut installed: Vec<((u32, u32, u32), PathBuf)>,
+    default_spec: Option<&str>,
+) -> Vec<PathBuf> {
+    // Newest first; equal tuples imply equal directories so no further
+    // tiebreak exists.
+    installed.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let mut head: Option<usize> = None;
+    if let Some(spec) = normalize_spec(default_spec) {
+        head = installed
+            .iter()
+            .position(|(v, _)| format_version(*v) == spec)
+            .or_else(|| {
+                installed
+                    .iter()
+                    .position(|(v, _)| format_version(*v).starts_with(&format!("{spec}.")))
+            });
+    }
+    let mut out = Vec::with_capacity(installed.len());
+    if let Some(i) = head {
+        out.push(installed.remove(i).1);
+    }
+    out.extend(
+        installed
+            .into_iter()
+            .filter(|(v, _)| compatible(*v))
+            .map(|(_, path)| path),
+    );
+    out
+}
+
+/// Node executables managed by nvm-sh (macOS/Linux), in probe order: the
+/// `default`-alias installation first, then every other engine-compatible
+/// installation newest-first. Version directories whose names do not parse
+/// (custom builds dropped in by hand) are appended last so the probe, not
+/// the filename heuristic, decides.
+#[cfg(not(windows))]
+pub(crate) fn nvm_candidates() -> Vec<PathBuf> {
+    let Some(root) = nvm_root() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(root.join("versions").join("node")) else {
+        return Vec::new();
+    };
+    let mut installed = Vec::new();
+    let mut unparsed = Vec::new();
+    for entry in entries.flatten() {
+        let bin_node = entry.path().join("bin").join("node");
+        if !bin_node.is_file() {
+            continue;
+        }
+        match parse_version(&entry.file_name().to_string_lossy()) {
+            Some(v) => installed.push((v, bin_node)),
+            None => unparsed.push(bin_node),
+        }
+    }
+    let default_spec = resolve_alias(&root, "default");
+    let mut out = order_nvm_versions(installed, default_spec.as_deref());
+    out.extend(unparsed);
+    out
+}
+
+/// Node executables managed by nvm-windows, in probe order: the active
+/// junction (`%NVM_SYMLINK%`, what `nvm use` selected) first, then every
+/// engine-compatible installation under `%NVM_HOME%` / `%APPDATA%\nvm`
+/// newest-first. Unparseable directory names are appended last and left to
+/// the probe.
+#[cfg(windows)]
+pub(crate) fn nvm_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(link) = std::env::var_os("NVM_SYMLINK") {
+        let candidate = PathBuf::from(link).join(exe_name("node"));
+        if candidate.is_file() {
+            out.push(candidate);
+        }
+    }
+    let mut installed = Vec::new();
+    let mut unparsed = Vec::new();
+    for root in nvm_roots() {
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let node_exe = entry.path().join(exe_name("node"));
+            if !node_exe.is_file() {
+                continue;
+            }
+            match parse_version(&entry.file_name().to_string_lossy()) {
+                Some(v) => installed.push((v, node_exe)),
+                None => unparsed.push(node_exe),
+            }
+        }
+    }
+    // nvm-windows records its selection in the junction rather than an
+    // alias file, so there is no default spec to resolve here.
+    out.extend(order_nvm_versions(installed, None));
+    out.extend(unparsed);
+    out
+}
+
+/// Candidate node executables in auto-detection order: the PATH hit first
+/// (what the launching shell resolved — a terminal-run dev shell after
+/// `nvm use` lands here), then nvm-managed installations, then well-known
+/// system locations.
+fn environment_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(found) = from_path() {
+        out.push(found);
+    }
+    out.extend(nvm_candidates());
+    out.extend(common_locations().into_iter().filter(|p| p.is_file()));
+    out
+}
+
+/// Result of probing the ordered environment candidates.
+struct EnvironmentScan {
+    /// First candidate that satisfies the engines range, if any.
+    usable: Option<NodeInfo>,
+    /// First candidate that runs but fails the range — surfaced when
+    /// nothing qualifies so the message can say "your Node is too old"
+    /// instead of pretending no Node exists.
+    near_miss: Option<NodeInfo>,
+}
+
+/// Probe ordered candidates until one satisfies the engines range,
+/// remembering the closest failure along the way.
+fn probe_environment(candidates: &[PathBuf]) -> EnvironmentScan {
+    let mut near_miss: Option<NodeInfo> = None;
+    for candidate in candidates {
+        let info = probe(candidate);
+        if info.ok {
+            return EnvironmentScan {
+                usable: Some(info),
+                near_miss,
+            };
+        }
+        if info.version.is_some() && near_miss.is_none() {
+            near_miss = Some(info);
+        }
+    }
+    EnvironmentScan {
+        usable: None,
+        near_miss,
+    }
+}
+
+/// Guidance when auto-detection finds no Node.js installation anywhere on
+/// disk — common on a fresh machine before any setup runs, or when the
+/// user has only just uninstalled the last runtime. Three independent
+/// install paths are listed because each user has a different preference;
+/// they pick whichever they would have used anyway, and the next status
+/// refresh (or the「检测 Node」button) re-runs detection.
+const NO_NODE_FOUND_GUIDANCE: &str =
+    "请通过下列任一方式安装 Node.js 22.19+（或 >=24）：\n\
+     • 版本管理器（推荐）：nvm 用户执行 `nvm install 24 && nvm alias default 24`；fnm 用户执行 `fnm install 24 && fnm default 24`；volta 用户执行 `volta install node@24`。\n\
+     • 系统包管理器：macOS `brew install node@24`；Ubuntu/Debian 装 NodeSource 后 `apt install nodejs`；Windows `winget install OpenJS.NodeJS.LTS`。\n\
+     • 官方安装包：从 https://nodejs.org/ 下载安装包，安装后重启本应用，或在「设置」中手动指定 node 可执行文件路径。";
+
+/// Guidance when auto-detection finds a Node.js installation but its
+/// declared version falls short of the engines range (`^22.19 || >=24`).
+/// Distinguishing this from "no Node at all" matters because the action
+/// is upgrade-in-place, not fresh-install.
+const NODE_TOO_OLD_GUIDANCE: &str =
+    "请升级 Node 到 22.19+（或 >=24）：使用 nvm 的用户执行 `nvm install 24 && nvm alias default 24`；使用 fnm 的用户执行 `fnm install 24 && fnm default 24`；也可从 https://nodejs.org/ 下载新版安装包覆盖安装，或在「设置」中手动指定新版 node 可执行文件路径。";
+
 /// Resolve the node executable from explicit config, then the environment.
 pub fn resolve(settings: &Settings) -> NodeInfo {
     if let Some(path) = settings.node_path.as_ref() {
@@ -173,33 +456,54 @@ pub fn resolve(settings: &Settings) -> NodeInfo {
         }
         // Fall through to detection; keep the reason so the UI can explain
         // why the configured path was rejected.
-        if let Some(found) =
-            from_path().or_else(|| common_locations().into_iter().find(|p| p.is_file()))
-        {
-            let mut detected = probe(&found);
+        let scan = probe_environment(&environment_candidates());
+        if let Some(mut detected) = scan.usable {
             detected.reason = format!(
                 "配置的路径不可用（{}），已自动回退到：{}",
-                info.reason,
-                found.display()
+                info.reason, detected.path
             );
             return detected;
         }
+        let detail = scan
+            .near_miss
+            .as_ref()
+            .map(|n| format!("环境中只有 {}（{}）。", n.path, n.reason))
+            .unwrap_or_default();
+        let guidance = if scan.near_miss.is_some() {
+            NODE_TOO_OLD_GUIDANCE
+        } else {
+            NO_NODE_FOUND_GUIDANCE
+        };
         return NodeInfo {
             path: path.clone(),
             ok: false,
             version: None,
-            reason: format!("配置路径不可用，且环境中也未找到 node：{}", info.reason),
+            reason: format!("配置路径不可用且未找到可用 node。{detail}{guidance}"),
         };
     }
-    let found = from_path().or_else(|| common_locations().into_iter().find(|p| p.is_file()));
-    match found {
-        Some(path) => probe(&path),
-        None => NodeInfo {
-            path: String::new(),
-            version: None,
-            ok: false,
-            reason: "未检测到 Node.js。请安装 Node.js 22.19+（或 >=24）后重试，或在设置中手动指定 node 路径。".into(),
-        },
+    let scan = probe_environment(&environment_candidates());
+    match scan.usable {
+        Some(info) => info,
+        None => {
+            let detail = scan
+                .near_miss
+                .as_ref()
+                .map(|n| format!("检测到 {}（{}）。", n.path, n.reason))
+                .unwrap_or_default();
+            let guidance = if scan.near_miss.is_some() {
+                NODE_TOO_OLD_GUIDANCE
+            } else {
+                NO_NODE_FOUND_GUIDANCE
+            };
+            NodeInfo {
+                path: scan.near_miss.clone().map(|n| n.path).unwrap_or_default(),
+                version: None,
+                ok: false,
+                reason: format!(
+                    "未检测到满足 dsh 要求（^22.19 || >=24）的 Node.js。{detail}{guidance}"
+                ),
+            }
+        }
     }
 }
 
@@ -219,11 +523,9 @@ pub fn resolve_pnpm(settings: &Settings, node_dir: &Path) -> Option<PathBuf> {
     if let Some(p) = which_in_dir("pnpm", node_dir) {
         return Some(p);
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            if let Some(p) = which_in_dir("pnpm", &dir) {
-                return Some(p);
-            }
+    for dir in path_dirs() {
+        if let Some(p) = which_in_dir("pnpm", &dir) {
+            return Some(p);
         }
     }
     None
@@ -244,11 +546,9 @@ pub fn find_npm(settings: &Settings, node_dir: &Path) -> Option<PathBuf> {
     if let Some(p) = which_in_dir("npm", node_dir) {
         return Some(p);
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            if let Some(p) = which_in_dir("npm", &dir) {
-                return Some(p);
-            }
+    for dir in path_dirs() {
+        if let Some(p) = which_in_dir("npm", &dir) {
+            return Some(p);
         }
     }
     None
@@ -272,8 +572,10 @@ pub fn ensure_pnpm(
         return Ok(p);
     }
     let npm = find_npm(settings, node_dir).ok_or_else(|| {
-        "未检测到 pnpm，也未找到可用的 npm（无法自动安装）。请先安装 Node.js，再执行 `npm install -g pnpm`，或在「设置」中手动指定 pnpm 可执行文件路径。"
-            .to_string()
+        format!(
+            "未检测到 pnpm，也未找到可用的 npm（无法自动安装）。{node}\n\n可选操作：① 装好 Node 后在终端执行 `npm install -g pnpm`；② 从 https://pnpm.io/installation 按平台安装；③ 在「设置」中手动指定已下载的 pnpm 可执行文件路径。",
+            node = NO_NODE_FOUND_GUIDANCE,
+        )
     })?;
     on_progress("未检测到 pnpm，正在通过 npm 自动安装（首次需要联网，常见 30 秒~2 分钟）");
     let cwd = node_dir.to_path_buf();
@@ -292,7 +594,8 @@ pub fn ensure_pnpm(
     )
     .map_err(|e| {
         format!(
-            "无法运行 npm 以自动安装 pnpm：{e}。请检查 Node.js 安装，或在「设置」中手动指定 pnpm 路径"
+            "无法运行 npm 以自动安装 pnpm：{e}。请检查 Node.js 安装，或在「设置」中手动指定 pnpm 路径。完整日志：{log}",
+            log = log_path.display()
         )
     })?;
     if !status.success() {
@@ -301,7 +604,7 @@ pub fn ensure_pnpm(
             .map(|c| c.to_string())
             .unwrap_or_else(|| "?".into());
         return Err(format!(
-            "自动安装 pnpm 失败（npm 退出码 {code}），常见原因：网络受限、企业代理未配置 npm registry、或权限不足（macOS/Linux 上默认 prefix 需写 /usr/local，建议改用 NVM 或 nvs）。完整日志：{log}\n\n也可手动执行 `npm install -g pnpm`，或在「设置」中指定已下载的 pnpm 路径。",
+            "自动安装 pnpm 失败（npm 退出码 {code}）。常见原因：网络受限、企业代理未配置 npm registry、npm prefix 权限不足（macOS/Linux 默认 prefix 需写 /usr/local，建议改用 nvm/fnm/volta 等用户级版本管理器），或 npm 本身不可用。完整日志：{log}\n\n可选操作：① 在终端执行 `npm install -g pnpm`；② 从 https://pnpm.io/installation 按平台安装；③ 在「设置」中指定已下载的 pnpm 可执行文件路径。",
             log = log_path.display()
         ));
     }
@@ -322,18 +625,18 @@ pub fn ensure_pnpm(
         }
     }
     Err(format!(
-        "npm install -g pnpm 已完成但仍未在常见位置找到 pnpm 可执行文件。请检查 npm prefix 与 PATH 设置，或在「设置」中手动指定 pnpm 路径。完整日志：{}",
+        "npm install -g pnpm 已完成但仍未在常见位置找到 pnpm 可执行文件。请检查 npm prefix 与 PATH 设置、确认 npm prefix/bin 在本应用 PATH 内，或在「设置」中手动指定 pnpm 路径。完整日志：{}",
         log_path.display()
     ))
 }
 
 /// Ask npm where it would install global packages — the parent dir of the
-/// script bin we are about to look in.
+/// script bin we are about to look in. npm is a `.cmd` batch shim on
+/// Windows, so the spawn goes through `process::script_output`, which
+/// routes batch files through `%ComSpec% /C` and stamps the merged PATH.
 fn npm_prefix(npm: &Path, cwd: &Path) -> Result<PathBuf, String> {
-    let mut cmd = Command::new(npm);
-    cmd.args(["config", "get", "prefix"]).current_dir(cwd);
-    let output = quiet(&mut cmd)
-        .output()
+    let npm_dir = npm.parent().unwrap_or(std::path::Path::new("."));
+    let output = crate::process::script_output(npm, &["config", "get", "prefix"], cwd, &[npm_dir])
         .map_err(|e| format!("无法读取 npm prefix：{e}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -347,4 +650,215 @@ fn npm_prefix(npm: &Path, cwd: &Path) -> Result<PathBuf, String> {
         return Err("npm prefix 为空".into());
     }
     Ok(PathBuf::from(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(not(windows))]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Sequential tag for `temp_root`, so parallel test runs do not
+    /// collide on the same `std::env::temp_dir()` scratch space. Used
+    /// only from the `cfg(not(windows))`-gated `resolve_alias` tests.
+    #[cfg(not(windows))]
+    #[allow(dead_code)]
+    static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// Build a fresh scratch directory under `std::env::temp_dir()`. Each
+    /// call returns a unique path and removes any previous contents at that
+    /// path so a stale scratch from a crashed earlier run cannot leak in.
+    #[cfg(not(windows))]
+    #[allow(dead_code)]
+    fn temp_root(tag: &str) -> PathBuf {
+        let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-desktop-node-test-{tag}-{}-{seq}",
+            std::process::id(),
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn vb(major: u32, minor: u32, patch: u32) -> PathBuf {
+        // Path content is irrelevant for ordering — only the tuple is read.
+        PathBuf::from(format!("/fake/{major}.{minor}.{patch}"))
+    }
+
+    #[test]
+    fn parse_version_accepts_v_prefix_and_prerelease() {
+        // The function reads `node --version` output, which always carries
+        // the leading `v`; the bare form is not a contract.
+        assert_eq!(parse_version("v22.19.0"), Some((22, 19, 0)));
+        assert_eq!(parse_version("v24.0.0-rc.1"), Some((24, 0, 0)));
+        assert_eq!(parse_version("not a version"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn normalize_spec_strips_v_and_whitespace() {
+        assert_eq!(normalize_spec(Some("v22.19.0")), Some("22.19.0".into()));
+        assert_eq!(normalize_spec(Some("  22  ")), Some("22".into()));
+        assert_eq!(normalize_spec(Some("")), None);
+        assert_eq!(normalize_spec(None), None);
+    }
+
+    #[test]
+    fn format_version_round_trips() {
+        assert_eq!(format_version((22, 19, 0)), "22.19.0");
+        assert_eq!(format_version((24, 0, 0)), "24.0.0");
+    }
+
+    #[test]
+    fn order_nvm_versions_picks_exact_default_first() {
+        let installed = vec![
+            ((24, 5, 0), vb(24, 5, 0)),
+            ((22, 19, 0), vb(22, 19, 0)),
+            ((22, 20, 0), vb(22, 20, 0)),
+        ];
+        let ordered = order_nvm_versions(installed, Some("v22.19.0"));
+        // exact match `v22.19.0` heads the list, the remaining compatible
+        // installations follow newest-first.
+        assert_eq!(ordered, vec![vb(22, 19, 0), vb(24, 5, 0), vb(22, 20, 0)],);
+    }
+
+    #[test]
+    fn order_nvm_versions_resolves_partial_spec_to_newest_match() {
+        // `22` resolves to the highest installed v22.x.y — mirroring nvm.
+        // v22.10.0 is intentionally below `^22.19` so the test stays
+        // focused on the spec-resolution path; the engines-range drop is
+        // covered separately.
+        let installed = vec![
+            ((22, 19, 0), vb(22, 19, 0)),
+            ((22, 20, 0), vb(22, 20, 0)),
+            ((24, 5, 0), vb(24, 5, 0)),
+        ];
+        let ordered = order_nvm_versions(installed, Some("22"));
+        assert_eq!(ordered, vec![vb(22, 20, 0), vb(24, 5, 0), vb(22, 19, 0)]);
+    }
+
+    #[test]
+    fn order_nvm_versions_drops_incompatible() {
+        // 18.0.0 falls short of `^22.19 || >=24` and must be omitted from
+        // the probe list — spawning it would only burn a child process
+        // for a result the engine-range check rejects anyway.
+        let installed = vec![
+            ((18, 19, 0), vb(18, 19, 0)),
+            ((22, 19, 0), vb(22, 19, 0)),
+            ((24, 5, 0), vb(24, 5, 0)),
+        ];
+        let ordered = order_nvm_versions(installed, None);
+        assert_eq!(ordered, vec![vb(24, 5, 0), vb(22, 19, 0)]);
+    }
+
+    #[test]
+    fn order_nvm_versions_unknown_spec_falls_back_to_desc_scan() {
+        // `lts/hydrogen` chains to `20.9.0`, which is installed only under
+        // the alias name `default` here. With no installed match the head
+        // stays empty and the compatible ones still come through newest-
+        // first.
+        let installed = vec![((22, 19, 0), vb(22, 19, 0)), ((24, 5, 0), vb(24, 5, 0))];
+        let ordered = order_nvm_versions(installed, Some("lts/hydrogen"));
+        assert_eq!(ordered, vec![vb(24, 5, 0), vb(22, 19, 0)]);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_alias_follows_chain_to_concrete_version() {
+        let root = temp_root("alias-chain");
+        let alias_dir = root.join("alias");
+        fs::create_dir_all(&alias_dir).unwrap();
+        fs::write(alias_dir.join("default"), "lts/hydrogen\n").unwrap();
+        fs::create_dir_all(alias_dir.join("lts")).unwrap();
+        fs::write(alias_dir.join("lts").join("hydrogen"), "20.9.0").unwrap();
+        assert_eq!(resolve_alias(&root, "default"), Some("20.9.0".into()));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_alias_returns_partial_spec_when_not_a_file() {
+        let root = temp_root("alias-partial");
+        fs::create_dir_all(root.join("alias")).unwrap();
+        fs::write(root.join("alias").join("default"), "22\n").unwrap();
+        // `alias/22` does not exist — nvm partial-spec behavior — so the
+        // chain terminates on the bare `22` and the caller matches it
+        // against installed versions.
+        assert_eq!(resolve_alias(&root, "default"), Some("22".into()));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_alias_bounds_cycles() {
+        let root = temp_root("alias-cycle");
+        let alias_dir = root.join("alias");
+        fs::create_dir_all(&alias_dir).unwrap();
+        fs::write(alias_dir.join("a"), "b").unwrap();
+        fs::write(alias_dir.join("b"), "a").unwrap();
+        // The hop cap stops the resolution; the final spec is whatever the
+        // loop ended on, never a hang. It does not name an installed
+        // version, so callers fall back to the desc scan.
+        assert_eq!(
+            resolve_alias(&root, "a").as_deref(),
+            Some("a"),
+            "alias resolution must terminate even when the chain cycles",
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn resolve_alias_reports_empty_alias_file_as_missing() {
+        let root = temp_root("alias-empty");
+        fs::create_dir_all(root.join("alias")).unwrap();
+        fs::write(root.join("alias").join("default"), "").unwrap();
+        assert_eq!(resolve_alias(&root, "default"), None);
+    }
+
+    /// The "no Node anywhere" message is the contract a user on a fresh
+    /// machine reads in the management panel. It must give three
+    /// independent install paths (version manager / package manager /
+    /// official installer) and the manual-path escape hatch, so the user
+    /// can act on whichever they would have used anyway.
+    #[test]
+    fn no_node_found_guidance_lists_three_install_paths() {
+        let msg = NO_NODE_FOUND_GUIDANCE;
+        assert!(msg.contains("nvm"), "should mention nvm");
+        assert!(
+            msg.contains("fnm") || msg.contains("volta"),
+            "should mention an alternative version manager",
+        );
+        assert!(msg.contains("brew"), "should mention Homebrew on macOS");
+        assert!(msg.contains("winget"), "should mention winget on Windows");
+        assert!(
+            msg.contains("https://nodejs.org/"),
+            "should point at the official installer",
+        );
+        assert!(
+            msg.contains("「设置」"),
+            "should remind the user about the manual-path setting",
+        );
+    }
+
+    /// The "Node too old" message is the contract a user with an
+    /// outdated system install reads. It must point at upgrade commands
+    /// (not fresh-install), and at the manual-path slot so they can keep
+    /// their old install and still point the shell at a newer one if
+    /// they prefer.
+    #[test]
+    fn node_too_old_guidance_points_at_upgrade_paths() {
+        let msg = NODE_TOO_OLD_GUIDANCE;
+        assert!(msg.contains("nvm install 24"), "should mention nvm upgrade");
+        assert!(
+            msg.contains("https://nodejs.org/"),
+            "should point at the official installer",
+        );
+        assert!(msg.contains("「设置」"), "should mention the manual path");
+        // The "too old" branch never has to recommend apt/brew/winget
+        // because the user already has a Node; those fresh-install
+        // commands are misleading and would clutter the message.
+        assert!(
+            !msg.contains("brew install"),
+            "fresh-install commands do not belong in an upgrade message",
+        );
+    }
 }

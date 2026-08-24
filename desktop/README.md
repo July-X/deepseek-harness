@@ -38,7 +38,7 @@
 - 一键启动 / 停止 / 打开 Harness 工作台
 - 更新菜单：列出 npm registry [`@deepseek-ai/dsh`](https://www.npmjs.com/package/@deepseek-ai/dsh) 的所有发布版本（含预发布标记），安装、切换活动版本、删除本地版本
 - 内核安装通过 pnpm 执行（`node-linker=hoisted` 保持扁平 `node_modules`，内容寻址存储让重复安装更快），安装过程逐行流式显示在进度面板中，完整日志落盘 `~/.dsh/desktop/logs/install-<版本>.log`
-- Node.js 自动检测与手动指定（要求 `^22.19 || >=24`，与 dsh 的 engines 一致）
+- Node.js 自动检测与手动指定（要求 `^22.19 || >=24`，与 dsh 的 engines 一致；自动发现 nvm（macOS/Linux `~/.nvm/versions/node/<v>/bin/node` 跟随 `alias/default` 链，Windows `%NVM_SYMLINK%` 与 `%NVM_HOME%/v*/node.exe`），免去 GUI 启动看不到 nvm PATH 时改手动路径的步骤；检测为空时按「完全没有 Node」与「Node 版本太老」分别给出可操作的安装路径建议）
 - pnpm 路径可配置（默认取 node 同目录或 PATH）
 - 端口可配置（默认 3080）
 - 内核运行日志查看；应用退出时自动回收内核子进程
@@ -110,13 +110,14 @@ npm run build:win         # x86_64-pc-windows-msvc
 ## 使用
 
 1. 启动桌面应用，打开管理面板。
-2. **设置**：确认已检测到满足要求的 Node.js（不满足时安装 Node 22.19+ 或手动指定路径）。
+2. **设置**：确认已检测到满足要求的 Node.js（不满足时安装 Node 22.19+ 或手动指定路径；通过 nvm 管理的 Node 会被自动发现——macOS/Linux 读 `~/.nvm/alias/default` 与 `versions/node/*/bin/node`，Windows 读 `%NVM_SYMLINK%` 与 `%NVM_HOME%/v*/node.exe`）。
 3. **内核更新** → 点击「检查更新」→ 在官方发布列表中选择版本点「安装」。
    - 安装通过 pnpm 执行，进度面板会实时滚动 pnpm 日志；pnpm 未安装时按提示 `npm install -g pnpm` 或在设置中指定 pnpm 路径。
    - 首次安装会自动成为活动版本并自动启动内核。
    - 之后安装的版本不会覆盖当前活动版本，可随时「切换」或「删除」。
 4. （可选）**插件** → 在「插件中心」按分类浏览、搜索（即时过滤）、按 Star/更新时间排序后一键安装，或手动填写 npm 包名（如 `@ace-zone/dsh-market`）/ GitHub 仓库 URL 安装；安装前自动校验插件是否符合 dsh 规范（package.json / `dsh.bundle.patch` / 入口文件），安装完成后重启工作台（关闭后重新启动）生效。
 5. 在「概览」页点击「启动工作台」：自动拉起内核、等待就绪后打开工作台窗口进入 Harness 界面；启动失败会自动弹出内核日志。「关闭工作台」会同时关闭工作台窗口并停止内核；内核运行中窗口被关掉时，可用「打开工作台窗口」重新打开。
+   - 工作台窗口侧栏头部右侧（品牌 logo 旁）悬浮着一个灯泡拉绳小挂件：点击（拉动）它，灯泡点亮的同时桌面端管理面板会归位到点击位置附近并提到当前桌面上方，方便随手操作；若灯泡闪红，说明与桌面壳的通信失败，可查看工作台 DevTools 控制台。
 6. 首次使用时在 Harness 的设置页配置 DeepSeek（`DEEPSEEK_API_KEY` 等）即可开始对话。
 
 

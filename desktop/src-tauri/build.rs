@@ -23,5 +23,9 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={icon}");
     }
+    // tauri-build parses `permissions/` into the app ACL manifest but does
+    // not watch it; without this, editing an app permission would not
+    // re-run the build script and the change would silently not apply.
+    println!("cargo:rerun-if-changed=permissions");
     tauri_build::build()
 }
