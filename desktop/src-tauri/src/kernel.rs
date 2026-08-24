@@ -125,7 +125,8 @@ pub fn data_dir(app: &tauri::AppHandle) -> PathBuf {
 }
 
 /// The user's OS home directory (`$HOME` on Unix, `%USERPROFILE%` on Windows).
-fn dirs_home() -> PathBuf {
+/// Shared with `node.rs`, which locates nvm-managed Node installs under it.
+pub(crate) fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -144,7 +145,10 @@ fn display_short(path: &Path) -> String {
         let mut out = String::from("~");
         if !rel.as_os_str().is_empty() {
             out.push('/');
-            out.push_str(&rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"));
+            out.push_str(
+                &rel.to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            );
         }
         out
     } else {
@@ -347,7 +351,7 @@ fn rotate_install_logs(logs: &Path, keep: &Path) {
     if logs.len() < KEEP {
         return;
     }
-    logs.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    logs.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
     for (_, path) in logs.iter().skip(KEEP - 1) {
         let _ = fs::remove_file(path);
     }
@@ -355,10 +359,21 @@ fn rotate_install_logs(logs: &Path, keep: &Path) {
 
 /// Ask pnpm to install `@deepseek-ai/dsh@<version>` into its directory.
 ///
+/// `node_dir` is the directory of the validated `node` executable and is
+/// prepended to the child's PATH so pnpm's `#!/usr/bin/env node` shebang
+/// (and any lifecycle script that shells out to `node`) can resolve it.
+/// Without this stamp, a GUI process launched with a launchd-only PATH
+/// (macOS .app bundles) or a system-only Windows PATH dies with
+/// `env: node: No such file or directory` even though the parent could
+/// find the binary to spawn pnpm — especially common with nvm-managed
+/// Node, where `node` lives under `~/.nvm/versions/node/<v>/bin` and
+/// never appears on the inherited PATH.
+///
 /// `on_progress` receives human-readable stage messages plus every raw
 /// installer log line, so the UI can show live output while the install runs.
 pub fn install_version(
     data_dir: &Path,
+    node_dir: &Path,
     pnpm_exe: &Path,
     version: &str,
     mut on_progress: impl FnMut(&str),
@@ -392,12 +407,16 @@ pub fn install_version(
         PNPM_REPORTER,
         spec.as_str(),
     ];
+    // `node_dir` first so any shebang or lifecycle child sees the exact
+    // node the parent used, even when pnpm itself sits elsewhere (e.g.
+    // a settings-pinned `pnpm` shim). See the doc comment above.
+    let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
     let status = run_pnpm(
         pnpm_exe,
         &args,
         &dir,
         &log_path,
-        &[pnpm_exe.parent().unwrap_or(Path::new("."))],
+        &[node_dir, pnpm_dir],
         &mut on_progress,
     )
     .map_err(pnpm_spawn_err)?;
@@ -578,6 +597,10 @@ pub fn start_maybe(data_dir: &Path, node: &Path) -> Result<Option<Child>, AppErr
 /// single-instance per data dir (the dev / release split gives each
 /// build its own dir), and two kernels on one dir are exactly the
 /// corruption scenario this function exists to prevent.
+/// windows_subsystem 下，Windows 端只保留接口、没有 orphan-reap 实现
+/// （见函数体注释）。参数在 Unix 分支里被 `data_dir == cwd` 比较使用，
+/// Windows 编译时整个 #[cfg(unix)] 块被跳过，所以参数属于平台特定未用。
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn reap_orphans(data_dir: &Path) {
     #[cfg(unix)]
     {

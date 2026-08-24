@@ -42,7 +42,7 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
   - `run_pnpm` 把 stdout/stderr 各用一个 drain 线程读入 mpsc channel，安装线程逐行回调 `on_progress` 并落盘日志——不要把两个管道放在同一线程顺序读取（会因管道缓冲区满而死锁）。
 - **plugins.rs**：社区插件管理。详见下文「插件机制」一节。
 - **releases.rs**：npm registry 全量版本 + dist-tags；registry 不可达时回退 GitHub Releases API 与 Atom feed。
-- **node.rs**：Node 检测与 engines 校验（`^22.19 || >=24`）、pnpm 解析（显式配置 → node 同目录 → PATH）。
+- **node.rs**：Node 检测（显式配置 → PATH → nvm 管理的 Node：macOS/Linux `$NVM_DIR/versions/node/<v>/bin/node` 跟随 `alias/default` 链，Windows `%NVM_SYMLINK%` 与 `%NVM_HOME%/v*/node.exe` → 常见系统位置）、engines 校验（`^22.19 || >=24`）、pnpm/npm 解析（显式配置 → node 同目录 → PATH）；空结果文案按「完全没有 Node」与「Node 版本太老」分别给出可操作的多路径（nvm/fnm/volta 版本管理器、系统包管理器 brew/winget/apt、官方安装包）。
 - **settings.rs**：`settings.json` 平铺结构（`node_path` / `pnpm_path` / `port`），serde default 兼容缺字段。
 
 ## 数据目录
@@ -130,6 +130,8 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
 | 症状 | 处理 |
 | --- | --- |
 | `pnpm install` 在 desktop/ 内装出整个 monorepo | 忘了 `--ignore-workspace` |
+| GUI 启动（Finder/开始菜单）下检测不到 nvm 的 Node，内核安装报「未检测到 Node.js」 | GUI 进程继承的 launchd / Window-Station PATH 不含 `~/.nvm/versions/node/*/bin` 或 `%NVM_HOME%\v*` | `node.rs` 直接扫描 nvm 根并按 default 别名解析 + 版本降序探测；仍失败时在「设置」手动指定 node 路径 |
+| 目标机器完全没有 Node（nvm 没装 / 装了但未 install / 系统未装） | `node.rs` 没有任何候选可探测 | 空结果文案分别给出三类安装路径：① 版本管理器 nvm/fnm/volta；② 系统包管理器 brew/winget/apt；③ 官方安装包；并附「设置」手动路径兜底 |
 | Tauri 同步命令里创建 webview 卡死 | 用新线程创建（`open_harness` 模式） |
 | macOS 访问 `127.0.0.1:3080` 失败 | WKWebView 默认允许环回，勿加 `NSAppTransportSecurity` 例外 |
 | 编辑器报 `capabilities/default.json` 缺 `$schema` | schema 由首次 `tauri build` 生成，属正常 |

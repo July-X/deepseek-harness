@@ -107,13 +107,20 @@ fn cached_node(state: &AppState, settings: &settings::Settings) -> node::NodeInf
 }
 
 #[tauri::command]
-pub fn detect_node(state: State<'_, AppState>) -> node::NodeInfo {
-    // Detection ignores any configured path: it reports what the environment
-    // has, so the UI can pre-fill the setting.
+pub async fn detect_node(state: State<'_, AppState>) -> Result<node::NodeInfo, String> {
+    // Detection ignores any configured path: it reports what the
+    // environment has, so the UI can pre-fill the setting. Resolving may
+    // spawn one child per environment candidate (PATH + nvm-managed
+    // installs + system locations) — keep those process spawns off the
+    // Tauri main thread.
     let data_dir = state.data_dir.clone();
-    let mut s = settings::load(&data_dir);
-    s.node_path = None;
-    node::resolve(&s)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = settings::load(&data_dir);
+        s.node_path = None;
+        node::resolve(&s)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -204,10 +211,7 @@ pub fn read_log_file(state: State<'_, AppState>, name: String) -> Result<String,
 /// Finder with the directory selected in its parent, `cmd /C start ""` on
 /// Windows opens File Explorer on the directory itself.
 #[tauri::command]
-pub async fn open_data_dir(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn open_data_dir(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     let path = state.data_dir.clone();
     app.opener()
@@ -289,16 +293,32 @@ pub async fn install_kernel(
     let (node_path, pnpm_exe) = promise_pnpm(&data_dir, &node_info, |msg| {
         let _ = on_event.send(msg.to_string());
     })?;
+    // `node_dir` is the directory of the validated `node` executable.
+    // Install children need it on PATH so pnpm's `#!/usr/bin/env node`
+    // shebang and any lifecycle script that shells out to `node` resolve
+    // it even when the GUI process inherited a launchd-only PATH (macOS
+    // .app bundles) — the common case for nvm-managed installs.
+    let node_dir = node_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
     // Clone the values the closure needs so we still own `data_dir` and
     // `version` for the post-install `set_active` / auto-start steps.
     let dir_for_thread = data_dir.clone();
+    let node_dir_for_thread = node_dir;
     let pnpm_ex = pnpm_exe;
     let version_for_thread = version.clone();
     let send = on_event.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        kernel::install_version(&dir_for_thread, &pnpm_ex, &version_for_thread, |msg| {
-            let _ = send.send(msg.to_string());
-        })
+        kernel::install_version(
+            &dir_for_thread,
+            &node_dir_for_thread,
+            &pnpm_ex,
+            &version_for_thread,
+            |msg| {
+                let _ = send.send(msg.to_string());
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -490,7 +510,10 @@ pub async fn stop_kernel(app: AppHandle) -> Result<(), String> {
 /// appends a `<style>` node with `!important` rules so the shell
 /// override wins regardless of which kernel version is running and
 /// regardless of load order between this script and the workbench's
-/// own stylesheets.
+/// own stylesheets. A second injected script (`pullstring-launcher.js`)
+/// renders a pull-string lamp floating at the workbench's top-left edge;
+/// pulling it invokes [`focus_main_shell`] to raise the management window
+/// over the current desktop.
 #[tauri::command]
 pub fn open_harness(app: AppHandle) -> Result<(), String> {
     let data_dir = crate::kernel::data_dir(&app);
@@ -516,6 +539,7 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
                 .inner_size(1280.0, 840.0)
                 .closable(false)
                 .initialization_script(include_str!("titlebar-pulse.js"))
+                .initialization_script(include_str!("pullstring-launcher.js"))
                 .build();
             if let Err(e) = result {
                 eprintln!("dsh-desktop: failed to open harness window: {e}");
@@ -528,6 +552,37 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// Raise the shell's main management window above the current desktop.
+///
+/// Invoked from the pull-string lamp injected into the workbench webview
+/// (`pullstring-launcher.js`) over `window.__TAURI__.core.invoke`, so it
+/// works regardless of which kernel version the workbench is running
+/// against. `show` + `unminimize` recover the window from a hidden or
+/// minimized state before `set_focus` moves it to the foreground; the
+/// window is configured non-resizable and always exists (tauri.conf.json),
+/// so a missing window is an internal error worth surfacing to the
+/// webview's console.
+///
+/// The always-on-top toggle before `set_focus` is the Windows
+/// foreground-lock workaround: `SetForegroundWindow` is silently ignored
+/// when the OS decides the process may not steal foreground (focus
+/// arriving over IPC rather than a direct input event), leaving the panel
+/// raised-but-behind. Pinning the window topmost and immediately releasing
+/// it forces it to the head of the normal z-order regardless; on
+/// macOS/Linux the toggle is a harmless no-op raise.
+#[tauri::command]
+pub fn focus_main_shell(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("主壳窗口不存在（label: main）".to_string());
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_always_on_top(false);
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 // --- plugins ---------------------------------------------------------------
 
 /// Snapshot of the plugin store and per-kernel materialization state.
