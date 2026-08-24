@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// [`crate::kernel::DEFAULT_PORT`] so the two definitions cannot drift —
 /// debug builds (3091) and release builds (3090) agree on the same
 /// fallback.
-pub use crate::kernel::DEFAULT_PORT as DEFAULT_PORT;
+pub use crate::kernel::DEFAULT_PORT;
 
 /// User-facing configuration the desktop shell needs to run a kernel.
 #[derive(Debug, Clone, Serialize, Deserialize)]

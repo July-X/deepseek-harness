@@ -1094,12 +1094,7 @@ fn fetch_git(
                 let t = l.trim_start();
                 t.starts_with("fatal:") || t.starts_with("error:")
             })
-            .or_else(|| {
-                stderr
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-            })
+            .or_else(|| stderr.lines().rev().find(|l| !l.trim().is_empty()))
             .unwrap_or("")
             .trim()
             .to_string();

@@ -171,8 +171,9 @@ mod tests {
     /// sure the mapper does not regress into English-only output.
     #[test]
     fn explain_maps_constructible_variants_to_chinese() {
-        let json_err: UpdaterError =
-            serde_json::from_str::<serde_json::Value>("not json").unwrap_err().into();
+        let json_err: UpdaterError = serde_json::from_str::<serde_json::Value>("not json")
+            .unwrap_err()
+            .into();
         let msg = explain_updater_error(json_err);
         assert!(msg.contains("JSON 解析失败"), "got: {msg}");
 
@@ -196,8 +197,9 @@ mod tests {
         // cannot be named here; round-trip it through a JSON parse error
         // that already exercises the `Serialization` arm to confirm the
         // matching logic stays sound for the remaining variants.
-        let json_err: UpdaterError =
-            serde_json::from_str::<serde_json::Value>("not json").unwrap_err().into();
+        let json_err: UpdaterError = serde_json::from_str::<serde_json::Value>("not json")
+            .unwrap_err()
+            .into();
         // Confirm non-ReleaseNotFound still goes through the mapper (i.e.
         // we did not accidentally swallow all errors).
         let mapped = explain_updater_error(json_err);

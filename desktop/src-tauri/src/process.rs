@@ -241,8 +241,7 @@ mod tests {
     #[test]
     fn merge_extra_path_prepends_single_dir() {
         let dir = PathBuf::from("/usr/local/bin");
-        let merged =
-            merge_extra_path(&format!("/usr/bin{SEP}/bin"), &[dir.as_path()]);
+        let merged = merge_extra_path(&format!("/usr/bin{SEP}/bin"), &[dir.as_path()]);
         assert_eq!(merged, format!("/usr/local/bin{SEP}/usr/bin{SEP}/bin"));
     }
 
@@ -250,8 +249,7 @@ mod tests {
     fn merge_extra_path_preserves_order() {
         let first = PathBuf::from("/opt/homebrew/bin");
         let second = PathBuf::from("/usr/local/bin");
-        let merged =
-            merge_extra_path("/usr/bin", &[first.as_path(), second.as_path()]);
+        let merged = merge_extra_path("/usr/bin", &[first.as_path(), second.as_path()]);
         assert_eq!(
             merged,
             format!("/opt/homebrew/bin{SEP}/usr/local/bin{SEP}/usr/bin")
@@ -301,11 +299,7 @@ mod tests {
     fn command_with_path_stamps_merged_path_on_child() {
         use std::process::Stdio;
 
-        let mut cmd = command_with_path(if cfg!(windows) {
-            "cmd.exe"
-        } else {
-            "/bin/sh"
-        });
+        let mut cmd = command_with_path(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
         // `cmd.exe /C "echo %PATH%"` and `/bin/sh -c 'echo "$PATH"'` both
         // round-trip the inherited PATH through the child untouched, so
         // any divergence from `env::merged_path()` is the helper's fault.
