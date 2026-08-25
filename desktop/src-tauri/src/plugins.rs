@@ -55,8 +55,6 @@ const META_SUBDIR: &str = ".meta";
 const SPEC_LINK: &str = "link:";
 /// Spec prefix for a pnpm file: (store copy) dependency.
 const SPEC_FILE: &str = "file:";
-/// Marker of shell-written dependency specs pointing at a kernel plugins dir.
-const WIRED_MARK: &str = "desktop/kernels/";
 
 // --- data model ------------------------------------------------------------
 
@@ -1918,8 +1916,27 @@ fn ensure_profile(data_dir: &Path, profile: &str) -> Result<(), AppError> {
 
 /// Whether a profile dependency spec is one the shell wrote (points at a
 /// kernel plugins dir). Protects CLI-managed dependencies from pruning.
+///
+/// Shell specs always end in `kernels/<version>/plugins/<id>`; match that
+/// path structure rather than the data-dir name. A name-based match
+/// (`desktop/kernels/`) misreads specs written by a debug shell
+/// (`desktop-dev/`) or a `DSH_DESKTOP_DATA_DIR` override as user-managed,
+/// so uninstall then leaves the dependency and its bundle layer behind and
+/// the kernel crashes at boot resolving the dangling bundle.
 fn is_managed_spec(spec: &str) -> bool {
-    (spec.starts_with(SPEC_LINK) || spec.starts_with(SPEC_FILE)) && spec.contains(WIRED_MARK)
+    let Some(path) = spec
+        .strip_prefix(SPEC_LINK)
+        .or_else(|| spec.strip_prefix(SPEC_FILE))
+    else {
+        return false;
+    };
+    let mut segs = path.split('/').rev();
+    let (Some(id), Some("plugins"), Some(version), Some("kernels")) =
+        (segs.next(), segs.next(), segs.next(), segs.next())
+    else {
+        return false;
+    };
+    !id.is_empty() && !version.is_empty()
 }
 
 /// Filter deciding which store items take part in materialization and
@@ -2822,27 +2839,12 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
             }
             None => (None, false),
         };
-        let expected_spec = active.as_ref().map(|version| {
-            let prefix = if actual_mode.as_deref() == Some("copy") {
-                SPEC_FILE
-            } else {
-                SPEC_LINK
-            };
-            let rel = relative_path(
-                &profile_dir(data_dir, &settings.profile),
-                &kernel_plugin_dir(data_dir, version, &item.id),
-            );
-            format!("{prefix}{}", spec_path_string(&rel))
-        });
         let wired = profile_manifest
             .as_ref()
             .and_then(|m| m.get("dependencies"))
             .and_then(|d| d.get(&item.name))
             .and_then(|s| s.as_str())
-            .map(|spec| {
-                expected_spec.as_ref().map(|e| spec == e).unwrap_or(false)
-                    || (!is_managed_spec(spec) && spec.contains(WIRED_MARK))
-            })
+            .map(is_managed_spec)
             .unwrap_or(false);
         if item
             .latest_version
@@ -3771,6 +3773,113 @@ mod tests {
 
         let changed = wire_manifest(&mut root, &specs, "web").expect("wire again");
         assert!(!changed);
+    }
+
+    #[test]
+    fn is_managed_spec_matches_shell_layout_not_dir_name() {
+        // release 壳（desktop/）与 dev 壳（desktop-dev/）写出的 spec 都必须
+        // 识别为托管，否则 dev 卸载残留会被当成用户依赖保留，内核启动时
+        // 解析悬空 bundle 崩溃（regression：WIRED_MARK 只匹配 "desktop/kernels/"）。
+        assert!(is_managed_spec(
+            "link:../../desktop/kernels/1.0.0/plugins/x"
+        ));
+        assert!(is_managed_spec(
+            "link:../../desktop-dev/kernels/0.1.1-rc.2/plugins/x"
+        ));
+        // DSH_DESKTOP_DATA_DIR 覆盖为任意目录名时写出的 spec（common==0 时
+        // relative_path 产出绝对路径）。
+        assert!(is_managed_spec(
+            "file:C:/Users/u/.dsh/desktop/kernels/1/plugins/x"
+        ));
+        assert!(is_managed_spec(
+            "link:/Volumes/ext/dsh-shell/kernels/1/plugins/@scope__pkg"
+        ));
+        // 非托管：用户/CLI 依赖——版本号、任意 link/file 目标、路径里
+        // kernels/plugins 不构成尾部布局、空的 version/id 段。
+        assert!(!is_managed_spec("^1.0.0"));
+        assert!(!is_managed_spec("link:../packages/my-plugin"));
+        assert!(!is_managed_spec("file:../vendor/kernels/pkg"));
+        assert!(!is_managed_spec(
+            "link:../../desktop/plugins/1.0.0/kernels/x"
+        ));
+        assert!(!is_managed_spec("link:../../desktop/kernels//plugins/x"));
+        assert!(!is_managed_spec("link:../../desktop/kernels/1/plugins/"));
+    }
+
+    #[test]
+    fn wire_manifest_prunes_dev_shell_residue() {
+        // dev 壳卸载插件后 manifest 残留的 desktop-dev spec 必须被清退：
+        // 空 specs（安全模式/最后一个插件被卸载）下依赖与 bundle 层一起消失，
+        // 只留下模板层。用户/CLI 条目不受影响。
+        let mut root = serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {
+                "other": "1.0.0",
+                "dsh-synapse": "link:../../desktop-dev/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse",
+            },
+            "dsh": {
+                "profile": {
+                    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-synapse"],
+                },
+            },
+        });
+        let specs = BTreeMap::new();
+        let changed = wire_manifest(&mut root, &specs, "web").expect("wire");
+        assert!(changed);
+        let deps = root["dependencies"].as_object().expect("deps");
+        assert!(!deps.contains_key("dsh-synapse")); // dev 壳卸载残留清退
+        assert!(deps.contains_key("other")); // 用户/CLI 条目保留
+        let bundles: Vec<&str> = root["dsh"]["profile"]["bundles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b.as_str())
+            .collect();
+        assert_eq!(
+            bundles,
+            ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+        );
+    }
+
+    #[test]
+    fn wire_manifest_rewrites_cross_shell_specs() {
+        // manifest 由 dev 壳接线，release 壳重新接线时 spec 重写为本壳的
+        // kernel plugins 目录。
+        let mut root = serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {
+                "dsh-synapse": "link:../../desktop-dev/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse",
+            },
+            "dsh": {
+                "profile": {
+                    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-synapse"],
+                },
+            },
+        });
+        let mut specs = BTreeMap::new();
+        specs.insert(
+            "dsh-synapse".to_string(),
+            (
+                "link:../../desktop/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse"
+                    .to_string(),
+                true,
+            ),
+        );
+        let changed = wire_manifest(&mut root, &specs, "web").expect("wire");
+        assert!(changed);
+        assert_eq!(
+            root["dependencies"]["dsh-synapse"].as_str().unwrap(),
+            "link:../../desktop/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse"
+        );
+        let bundles: Vec<&str> = root["dsh"]["profile"]["bundles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b.as_str())
+            .collect();
+        assert!(bundles.contains(&"dsh-synapse"));
     }
 
     #[test]

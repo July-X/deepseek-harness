@@ -56,6 +56,7 @@
 4. **接线**：把插件登记进 `~/.dsh/profiles/<profile>/package.json`：
    - `dependencies["<包名>"] = "link:../../desktop/kernels/<活动版本>/plugins/<id>"`（link 模式）
    - `dependencies["<包名>"] = "file:../../desktop/kernels/<活动版本>/plugins/<id>"`（copy 模式）
+   - dev 壳（`tauri dev`）的物化目标在 `desktop-dev/` 下，写出的 spec 相应含 `desktop-dev/kernels/`。依赖是否由壳接管（卸载/隔离时清退）按 spec 的尾部路径结构 `kernels/<version>/plugins/<id>` 判定，与数据目录名无关；其余 spec（版本号、指向任意目录的 link/file）视为用户/CLI 管理，接线校正不动。
    - 若插件清单声明 `dsh.bundle`，把包名追加进 `dsh.profile.bundles`（去重、保留模板层）。
    - 在 profile 目录运行 `pnpm install`（profile 自带 pnpm-workspace.yaml，hoisted/peers 语义与 `dsh plugin` 一致），使 `node_modules/<包名>` 指向物化目录。内核启动时 Loader 按 bundle 名从 profile 解析并应用其 patch 层，与 `dsh plugin add` 行为一致。
 5. **卸载**：反向执行——移除依赖与 bundle 层、profile pnpm install 清理、删除所有内核的物化产物与中央库目录、更新 store.json。
