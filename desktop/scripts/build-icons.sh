@@ -6,7 +6,7 @@
 # Outputs:
 #   src-tauri/icons/{32x32,128x128,128x128@2x,icon}.png, icon.ico, icon.icns
 #   assets/whale-icon-512.png
-#   ui/whale-icon.png           (rendered at 128 from the SMALL master: the panel shows it at 60 CSS px)
+#   ui/public/whale-icon.png           (rendered at 128 from the SMALL master: the panel shows it at 60 CSS px)
 #   ../website/public/favicon.svg   (brand-blue whale)
 #   ../apps/web/public/favicon.svg  (black whale, white under dark color scheme; pwa-manifest.e2e.ts
 #                                    pins the media query and fill="#000")
@@ -43,7 +43,7 @@ for s in 16 24 32 48 64; do
     -define png:color-type=6 "$TMP/small-$s.png"
 done
 
-# ui/whale-icon.png stays at 128 from the SMALL master: the panel renders it
+# ui/public/whale-icon.png stays at 128 from the SMALL master: the panel renders it
 # at 60 CSS px so small-master geometry is correct, but we still supersample
 # to keep the white highlight dot and spark rays sharp instead of cairo-blurred.
 magick "$TMP/small-super.png" -filter LanczosSharp -resize 128x128 \
@@ -61,7 +61,7 @@ magick "$TMP/small-super.png" -filter LanczosSharp -resize 128x128 \
 # other Dock icon. Corner radius is 18% of the canvas (≈22.4% of the
 # tile, the Big Sur squircle proportion); the whale is 75% of the
 # tile (≈60% of the canvas), matching the glyph weight of neighboring
-# app icons. The panel brand mark (`ui/whale-icon.png`) and the SVG
+# app icons. The panel brand mark (`ui/public/whale-icon.png`) and the SVG
 # favicons stay fully transparent — they layer onto the dark
 # management surface and web backgrounds. Output stays RGBA
 # (png:color-type=6): tauri::generate_context! refuses RGB PNGs at
@@ -92,7 +92,7 @@ cp "$TMP/master-128-plate.png" "$ICONS/128x128.png"
 cp "$TMP/master-256-plate.png" "$ICONS/128x128@2x.png"
 cp "$TMP/master-512-plate.png" "$ICONS/icon.png"
 cp "$TMP/master-512-plate.png" assets/whale-icon-512.png
-cp "$TMP/small-128.png" ui/whale-icon.png
+cp "$TMP/small-128.png" ui/public/whale-icon.png
 
 # Windows .ico: per-size frames, small variant below 128.
 magick \

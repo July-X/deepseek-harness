@@ -5,7 +5,7 @@
 ## 模块
 
 ```
-ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ kernel.rs / plugins.rs ──▶ pnpm/git/tar 子进程
+ui/src（Vue 3 SPA）──invoke(Channel)──▶ commands.rs ──▶ kernel.rs / plugins.rs ──▶ pnpm/git/tar 子进程
                                    │              │
                               settings.rs    releases.rs（npm registry → GitHub 回退）
                                    │
@@ -13,6 +13,7 @@ ui/app.js + ui/plugins.js ──invoke(Channel)──▶ commands.rs ──▶ k
 ```
 
 - `commands.rs`：Tauri 命令层。长任务用 `spawn_blocking` + `tauri::ipc::Channel` 向 UI 推进度事件。
+- `ui/`：管理面板前端（Vue 3 + Element Plus，Vite 构建）。源码在 `ui/src/`（状态与动作集中在 `store.js` / `plugins.js` / `skills.js` / `progress.js` / `logs.js`，与 Rust 只经 `bridge.js` 的 invoke/Channel 通信）；`vite build` 产物 `ui/dist/` 是 `tauri.conf.json` 的 `frontendDist`，`tauri dev` 走 `devUrl`（vite dev server，5173）热更新。
 - `kernel.rs`：内核安装、active 指针、启动 / 停止、端口探测；详见下文「内核生命周期」。
 - `plugins.rs`：社区插件的中央库、内核物化、profile 接线、更新检查、社区目录；实现规则见 [plugin-internals.md](plugin-internals.md)，设计层见 [plugin-management.md](plugin-management.md)。
 - `releases.rs`：npm registry 全量版本 + dist-tags；registry 不可达时回退 GitHub Releases API 与 Atom feed。

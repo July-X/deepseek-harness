@@ -11,7 +11,7 @@
 ┌────────────────────────── dsh-desktop (Tauri v2) ──────────────────────────┐
 │                                                                             │
 │  主窗口（管理面板）       ┌──────────────────────────────────────────────┐  │
-│  ui/ 静态页面             │  Harness 窗口 (WebviewWindow "harness")      │  │
+│  ui/（Vue 3 SPA）         │  Harness 窗口 (WebviewWindow "harness")      │  │
 │  · 内核状态/启动/停止      │  加载 http://127.0.0.1:<port>               │  │
 │  · 更新菜单（版本管理）    │  = dsh web 的 Web UI                        │  │
 │  · 设置 / 日志             │                                              │  │
@@ -49,14 +49,25 @@
 
 ```text
 desktop/
-├── package.json              # 仅 @tauri-apps/cli 脚本；不进 pnpm workspace（pnpm-lock.yaml 独立管理）
-├── ui/                       # 管理面板（零构建静态前端）
-│   ├── index.html
-│   ├── styles.css
-│   ├── plugins.js            # 插件管理卡片（安装/更新/目录搜索/更新提醒）
-│   ├── skills.js             # 技能管理卡片（包安装/手动安装/更新提醒/即时生效提示）
-│   ├── whale-icon.png        # 顶栏 logo（60 CSS px 显示，故由 assets/whale-icon-small.svg 渲染 128px）
-│   └── app.js
+├── package.json              # @tauri-apps/cli + 管理面板前端依赖（vue / element-plus / vite）；pnpm-workspace.yaml 让其成为独立 pnpm 根（pnpm-lock.yaml 独立管理）
+├── vite.config.mjs           # 管理面板构建：root=ui，产物 → ui/dist（frontendDist），dev server 5173
+├── ui/                       # 管理面板（Vue 3 + Element Plus + Vite）
+│   ├── index.html            # Vite 入口（含标题栏鲸眼扫光节点）
+│   ├── public/
+│   │   └── whale-icon.png    # 顶栏 logo（60 CSS px 显示，故由 assets/whale-icon-small.svg 渲染 128px）
+│   └── src/
+│       ├── main.js / App.vue # 装配：Element Plus 暗色主题（zh-CN）、布局与浮层挂载
+│       ├── bridge.js         # Tauri invoke / Channel / 事件监听的唯一出口
+│       ├── store.js          # 内核状态、版本列表、工作台启停、外壳自更新、设置
+│       ├── plugins.js        # 插件状态与动作（安装/更新/目录搜索/更新提醒）
+│       ├── skills.js         # 技能状态与动作（包安装/更新提醒/即时生效提示）
+│       ├── progress.js       # 长任务进度浮层 + 日志流（ANSI 剥离、400 行滚动窗口）
+│       ├── logs.js           # 日志查看面板状态
+│       ├── loading.js        # 按钮级 loading 注册表 + 全局 busy 信号量
+│       ├── notify.js         # ElMessage 轻提示 / ElMessageBox 确认框封装
+│       ├── theme.css         # 品牌深色主题（Element Plus 变量覆写）与面板动效
+│       └── components/       # SideBar + 五个面板 + 进度/日志/事故浮层
+│   # ui/dist/ 是 vite build 产物（gitignored），由 tauri build 打包
 ├── docs/
 │   ├── plugin-management.md  # 插件管理设计（目录布局、链接/复制双模式、接线、更新机制）
 │   └── skill-management.md   # 技能管理设计（中央库 + 物化到 ~/.dsh/skills，热生效，无需接线）
@@ -65,9 +76,9 @@ desktop/
 │   ├── whale-icon-small.svg  # 小尺寸母版（红眼夸大版，用于 ≤64px 与 favicon 投影）
 │   └── whale-icon-512.png    # 512px 位图（脚本从 whale-icon.svg 渲染）
 ├── scripts/
-│   └── build-icons.sh        # 从双 SVG 母版再生成全部图标：src-tauri/icons、ui/whale-icon.png、website 与 apps/web 的 favicon
+│   └── build-icons.sh        # 从双 SVG 母版再生成全部图标：src-tauri/icons、ui/public/whale-icon.png、website 与 apps/web 的 favicon
 ├── src-tauri/
-│   ├── tauri.conf.json       # Tauri v2 配置（frontendDist → ../ui）
+│   ├── tauri.conf.json       # Tauri v2 配置（frontendDist → ../ui/dist，devUrl → vite 5173）
 │   ├── Cargo.toml
 │   ├── capabilities/default.json
 │   ├── icons/                # 应用图标集（黑鲸+红眼，由 assets 管线生成并提交）
@@ -89,21 +100,26 @@ desktop/
 ```sh
 cd desktop
 
-# 安装 Tauri CLI（自动检测 pnpm，缺失时回退到 npm；带 --ignore-workspace 防向上匹配根 pnpm-workspace.yaml）
+# 安装依赖（Tauri CLI + Vue/Element Plus/Vite；自动检测 pnpm，缺失时回退到 npm。
+# desktop/pnpm-workspace.yaml 让 pnpm 把本目录当独立根，不会向上匹配仓库根 workspace）
 npm run deps
 
-# 开发运行（需先安装内核，见「使用」）
+# 开发运行（自动先起 vite dev server（5173）再起 tauri dev；需先安装内核，见「使用」）
 npm run dev
 
-# 本机当前架构构建
+# 本机当前架构构建（自动先 vite build → ui/dist 再 tauri build）
 npm run build
+
+# 只动前端时的快速迭代：单独构建 / 起 dev server
+npm run build:ui
+npm run dev:ui
 
 # 指定目标平台
 npm run build:mac-intel   # x86_64-apple-darwin（Intel Mac）
 npm run build:win         # x86_64-pc-windows-msvc
 ```
 
-> 想直接走 pnpm / npm 也行：`pnpm install --ignore-workspace` 或 `npm install --ignore-workspace` 同样有效；wrapper 只是省略记忆参数。
+> 想直接走 pnpm / npm 也行：`pnpm install` 或 `npm install` 同样有效；wrapper 只是自动选择包管理器。
 
 产物位于 `src-tauri/target/release/bundle/`（macOS 为 `.dmg`，Windows 为 NSIS 安装包 `.exe`）。
 

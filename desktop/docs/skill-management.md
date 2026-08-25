@@ -123,7 +123,7 @@ v1 只提供手动安装：与插件面板同款的「`<input>` 地址 + 回车�
 | --- | --- |
 | `src-tauri/src/skills.rs`（新增） | 镜像 plugins.rs 结构：store/scan/materialize/check_updates/catalog/install/update/uninstall/set_enabled/reconcile。纯文件操作，无 pnpm 构建链（仅 git/tar 子进程，走 `process::command_with_path`） |
 | `commands.rs` | `skill_status` / `skill_install` / `skill_update` / `skill_uninstall` / `skill_set_enabled` / `skill_check_updates` 命令族，全部 async + `spawn_blocking`（精简版 `run_skill_command`：技能无需 pnpm 解析），长任务走 Channel 推进度 |
-| `ui/skills.js` + `index.html` | 技能页签：包行第一行「名称/来源/版本（左）+ tag 与更新/仓库/卸载按钮（右）」同行显示；不提供单技能启停 UI（卸载即停用，不单独造「启停」概念）；手动安装行复用插件同款 `install-row` 样式与 `withPluginProgress` 进度面板 |
+| `ui/src/skills.js` + `components/SkillsPanel.vue` | 技能页签：包行「名称/来源/版本（左）+ tag 与更新/仓库/卸载按钮（右）」；不提供单技能启停 UI（卸载即停用，不单独造「启停」概念）；手动安装行复用插件同款输入行与 `withProgress` 进度面板 |
 | `settings.rs` | 无新字段（接线点固定） |
 
 frontmatter 校验是内核规则的壳侧前置：解析器只取 frontmatter 顶层 `name` / `description`（带引号去引号），无法解析或不符合 kebab-case 的候选按"内核也会忽略"处理——安装时以警告形式展示并跳过，整包一个可用技能都没有才失败。这比内核的静默忽略更响，避免"装了却不出现"。启动对账 `skills::reconcile()`：清理三段式暂存残留、为启用技能补链/修复断链、清退停用技能的残留、清扫指向中央库但不在清单中的孤儿链接（用户手放的文件与非本库链接一律不动）；失败写入 store.warning 由面板展示。

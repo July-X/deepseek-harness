@@ -6,7 +6,7 @@ DeepSeek Harness is a plugin-based agent harness on vendored Cordis: **everythin
 
 桌面壳（[`desktop/`](desktop/)）是独立交付物，**不**发布、不重打包、也不修改 [`packages/`](packages/) 下的内核代码（`@deepseek-ai/dsh` 及其各分组下的包）。内核代码由用户从 npm registry 安装官方版本，桌面壳运行时不携带内核代码副本——任何对 `packages/` 的改动都不会随桌面壳 release 抵达用户机器。
 
-桌面壳要影响工作台窗口或内核行为时，必须通过自有边界（`desktop/src-tauri/` Rust 进程 + `desktop/ui/` 静态管理面板）实现。典型路径：
+桌面壳要影响工作台窗口或内核行为时，必须通过自有边界（`desktop/src-tauri/` Rust 进程 + `desktop/ui/` 管理面板，Vue 3 + Element Plus SPA）实现。典型路径：
 
 - 工作台窗口加载的页面样式 / 行为覆盖 → `WebviewWindowBuilder::initialization_script()` 在创建 webview 时注入脚本或样式
 - 内核生命周期（启动 / 停止 / 端口 / 日志）→ `desktop/src-tauri/src/kernel.rs` 子进程管理

@@ -4,22 +4,24 @@
 
 ## 范围
 
-- **不侵入内核代码**：`packages/`（`@deepseek-ai/dsh` 各分组）是用户从 npm registry 自行安装的源码，桌面壳**不**打包、不重发布、也不修改——改动不会随 release 抵达用户机器。需要影响工作台窗口或内核行为时只走自有边界（`src-tauri/` Rust 进程 + `ui/` 静态管理面板）：脚本/样式覆盖用 `WebviewWindowBuilder::initialization_script()`、内核生命周期在 `kernel.rs`、配置落盘在 `settings.rs`。"只能改内核"的改动推到对应内核 PR。完整边界依据见仓库根 [AGENTS.md](../AGENTS.md)「dsh-desktop 范围约束」。
-- **独立交付物**：不加入仓库根 pnpm workspace，不参与上游 lint / hygiene / release 门禁。`desktop/` 内 `pnpm install` / `npm install` 必须带 `--ignore-workspace`（`scripts/install.mjs` 自动追加并切换包管理器）。
+- **不侵入内核代码**：`packages/`（`@deepseek-ai/dsh` 各分组）是用户从 npm registry 自行安装的源码，桌面壳**不**打包、不重发布、也不修改——改动不会随 release 抵达用户机器。需要影响工作台窗口或内核行为时只走自有边界（`src-tauri/` Rust 进程 + `ui/` 管理面板）：脚本/样式覆盖用 `WebviewWindowBuilder::initialization_script()`、内核生命周期在 `kernel.rs`、配置落盘在 `settings.rs`。"只能改内核"的改动推到对应内核 PR。完整边界依据见仓库根 [AGENTS.md](../AGENTS.md)「dsh-desktop 范围约束」。
+- **独立交付物**：不加入仓库根 pnpm workspace，不参与上游 lint / hygiene / release 门禁。`desktop/pnpm-workspace.yaml`（allowBuilds 放行 esbuild）让 pnpm 把本目录当独立根——直接 `pnpm install` 即可，**不要**加 `--ignore-workspace`（它会让 pnpm 跳过该文件，esbuild postinstall 在 strictDepBuilds 下变成硬错误）；缺 pnpm 时 `scripts/install.mjs` 回退 npm。
 - **信任边界**：仅信任官方 `deepseek-ai` 仓库与 npm `@deepseek-ai` 命名空间；版本列表优先 npm registry，GitHub Releases 仅作回退。
 
 ## 命令
 
 ```sh
-npm run deps                      # 安装 @tauri-apps/cli（带 --ignore-workspace；缺 pnpm 时回退 npm）
-npm run dev                       # tauri dev
-npm run build                     # 本机构建（.dmg / NSIS）
+npm run deps                      # 安装依赖（pnpm 优先，缺失回退 npm）
+npm run dev                       # tauri dev（自动先起 vite dev server，5173 热更新）
+npm run dev:ui                    # 只起管理面板 dev server（纯前端迭代，浏览器里无 Tauri 桥）
+npm run build                     # 本机构建（.dmg / NSIS；自动先 vite build → ui/dist）
+npm run build:ui                  # 只构建管理面板 → ui/dist
 cargo check                       # 在 src-tauri/ 内：快速编译检查
 cargo clippy --all-targets        # lint，零警告基线
 cargo fmt                         # rustfmt 格式化
 ```
 
-UI 是零构建静态页面（`ui/index.html` + `app.js` + `styles.css`），改完直接生效；可用 `node --check ui/app.js` 验证。Rust 改动至少 `cargo check`；提交前 `cargo clippy --all-targets && cargo fmt`。
+UI 是 Vue 3 + Element Plus 单页应用（源码 `ui/src/`，Vite 构建到 `ui/dist/`，即 tauri.conf.json 的 `frontendDist`）。状态与动作集中在 `ui/src/store.js` / `plugins.js` / `skills.js` / `progress.js` / `logs.js`，组件只读状态、调动作；与 Rust 的通信只允许走 `ui/src/bridge.js` 的 invoke/Channel。触发 IO 的按钮必须挂 loading（`loading.js` 的 `withLoading(key, …)` + `:loading="isLoading(key)"`；长任务走 `progress.js` 的 `withProgress`）。验证：改完跑 `npm run build:ui`；Rust 改动至少 `cargo check`；提交前 `cargo clippy --all-targets && cargo fmt`。
 
 ## 数据目录
 

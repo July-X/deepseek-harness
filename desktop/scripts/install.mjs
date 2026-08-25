@@ -2,10 +2,13 @@
 // Detect-then-install wrapper.
 //
 // desktop is intentionally a standalone deliverable that does NOT join the
-// repository's pnpm workspace — passing `--ignore-workspace` keeps
-// `pnpm install` rooted at this directory instead of hoisting the whole
-// monorepo. When pnpm is missing we fall back to npm so users without pnpm
-// can still pull in `@tauri-apps/cli` and run `tauri dev` / `tauri build`.
+// repository's pnpm workspace — its own `pnpm-workspace.yaml` (allowBuilds
+// for esbuild) makes pnpm treat this directory as an independent root, so a
+// plain `pnpm install` here never climbs to the monorepo. Do NOT pass
+// `--ignore-workspace`: it would make pnpm skip the local workspace file and
+// its allowBuilds whitelist, turning esbuild's postinstall into a hard
+// install error (strictDepBuilds). When pnpm is missing we fall back to npm
+// (npm runs dependency postinstalls by default, no whitelist needed).
 //
 // Invoke through `npm run deps` or `pnpm run deps` from the desktop
 // directory; never call this file directly (it lives under scripts/ and is
@@ -37,9 +40,7 @@ function has(cmd) {
 
 const usePnpm = has('pnpm');
 const pkgMgr = usePnpm ? 'pnpm' : 'npm';
-// `--ignore-workspace` is pnpm-specific; npm has no concept of the
-// repository root's pnpm-workspace.yaml and does not need the flag.
-const args = usePnpm ? ['install', '--ignore-workspace'] : ['install'];
+const args = ['install'];
 
 if (!usePnpm) {
   console.log('[install] pnpm 未检测到，回退到 npm');
