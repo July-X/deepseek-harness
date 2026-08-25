@@ -336,6 +336,10 @@ fn split_npm_spec(spec: &str) -> Result<(String, Option<String>), AppError> {
 
 /// Whether the input names a local folder: explicit prefix, tilde form,
 /// absolute POSIX path, `.`-relative path, or a Windows drive-letter path.
+/// The `\\?\` verbatim prefix is recognized too: `parse_local_spec` stores
+/// the canonicalized path as the package source, and `canonicalize` on
+/// Windows returns verbatim paths — without this arm the 「更新」 re-parse
+/// of a local package falls through to the npm-name validation and fails.
 fn looks_like_local(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
     lower.starts_with(LOCAL_PREFIX)
@@ -343,6 +347,7 @@ fn looks_like_local(s: &str) -> bool {
         || s.starts_with('/')
         || s.starts_with("./")
         || s.starts_with("../")
+        || s.starts_with(r"\\?\")
         || (s.len() >= 3
             && s.as_bytes()[1] == b':'
             && (s.as_bytes()[2] == b'\\' || s.as_bytes()[2] == b'/'))
@@ -803,7 +808,7 @@ fn write_source_marker(spec: &SkillSpec, version: &str, dest: &Path) -> Result<(
 /// Recursively copy source into target, replacing whatever exists.
 fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
     if target.is_symlink() {
-        let _ = fs::remove_file(target);
+        remove_link(target);
     } else if target.exists() {
         let _ = fs::remove_dir_all(target);
     }
@@ -1111,12 +1116,20 @@ fn resolved_source(path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
+/// Remove a filesystem link without touching its target. On Windows
+/// `DeleteFile` rejects directory symlinks (ERROR_ACCESS_DENIED) — only
+/// `RemoveDirectory` removes them — while file symlinks need `DeleteFile`;
+/// trying both covers either kind on every platform.
+fn remove_link(path: &Path) {
+    if fs::remove_file(path).is_err() {
+        let _ = fs::remove_dir(path);
+    }
+}
+
 /// Remove one active-root entry whatever it is (link, dir, or file).
 fn remove_target(target: &Path) {
     match fs::symlink_metadata(target) {
-        Ok(md) if md.file_type().is_symlink() => {
-            let _ = fs::remove_file(target);
-        }
+        Ok(md) if md.file_type().is_symlink() => remove_link(target),
         Ok(md) if md.is_dir() => {
             let _ = fs::remove_dir_all(target);
         }
@@ -1602,7 +1615,7 @@ fn reconcile_home(home: &Path) {
                 })
                 .unwrap_or(false);
             if orphan {
-                let _ = fs::remove_file(&path);
+                remove_link(&path);
             }
         }
     }
@@ -1885,7 +1898,9 @@ mod tests {
         let home = TestHome::new();
         let src = home.root().join("pack");
         write_bundle(&src, "one", "fix-me", "r");
-        let item = install_into(&home.root(), &src.to_string_lossy(), "link", &mut |_| {}).unwrap();
+        // `_item` is only read by the unix-only orphan-link block below.
+        let _item =
+            install_into(&home.root(), &src.to_string_lossy(), "link", &mut |_| {}).unwrap();
 
         // Simulate external breakage: the link disappeared.
         let target = skills_root(&home.root()).join("fix-me");
@@ -1896,9 +1911,11 @@ mod tests {
 
         // An orphan link pointing into the store but absent from the store
         // inventory gets swept; user files stay untouched.
-        let ghost_src = store_pkg_dir(&home.root(), &item.id).join("one");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(ghost_src, skills_root(&home.root()).join("ghost")).unwrap();
+        {
+            let ghost_src = store_pkg_dir(&home.root(), &_item.id).join("one");
+            std::os::unix::fs::symlink(ghost_src, skills_root(&home.root()).join("ghost")).unwrap();
+        }
         let user_file = skills_root(&home.root()).join("mine.md");
         fs::write(&user_file, "---\nname: mine\ndescription: keep\n---\n").unwrap();
         reconcile_home(&home.root());
