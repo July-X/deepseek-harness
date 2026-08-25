@@ -2,7 +2,7 @@
 // 技能页：已安装技能包（来源 / 版本 / 技能数、更新 / 重新同步 / 卸载）+
 // 手动安装（git 来源，回车即装）。安装与卸载对运行中的工作台即时生效。
 import { computed } from 'vue';
-import { Refresh, InfoFilled } from '@element-plus/icons-vue';
+import { Refresh, InfoFilled, Download, TopRight, Delete } from '@element-plus/icons-vue';
 import {
   skillStore,
   originLabel,
@@ -74,12 +74,12 @@ function metaText(row) {
               <el-tag v-else-if="row.actual_mode === 'link'" type="success" size="small" effect="plain">链接</el-tag>
               <template v-if="row.latest_version">
                 <el-tag type="warning" size="small" effect="plain">有更新 {{ row.latest_version }}</el-tag>
-                <el-button size="small" type="primary" :disabled="globalBusy" @click="updateSkill(row.id)">更新</el-button>
+                <el-button size="small" type="primary" :icon="Download" :disabled="globalBusy" @click="updateSkill(row.id)">更新</el-button>
               </template>
-              <el-button v-else-if="row.origin === 'local'" size="small" text :disabled="globalBusy" @click="updateSkill(row.id)">
+              <el-button v-else-if="row.origin === 'local'" size="small" text :icon="Refresh" :disabled="globalBusy" @click="updateSkill(row.id)">
                 重新同步
               </el-button>
-              <el-button v-if="row.repo_url" size="small" text @click="openExternal(row.repo_url)">仓库</el-button>
+              <el-button v-if="row.repo_url" size="small" text :icon="TopRight" @click="openExternal(row.repo_url)">仓库</el-button>
               <el-popconfirm
                 title="确认卸载该技能包？"
                 confirm-button-text="卸载"
@@ -88,7 +88,7 @@ function metaText(row) {
                 @confirm="uninstallSkill(row.id)"
               >
                 <template #reference>
-                  <el-button size="small" type="danger" plain :disabled="globalBusy">卸载</el-button>
+                  <el-button size="small" type="danger" plain :icon="Delete" :disabled="globalBusy">卸载</el-button>
                 </template>
               </el-popconfirm>
             </span>

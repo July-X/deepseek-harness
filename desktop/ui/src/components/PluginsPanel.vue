@@ -2,7 +2,7 @@
 // 插件页：已安装列表（同步 / 接线 / 隔离状态徽章 + 更新 / 模式切换 / 卸载）、
 // 手动安装（回车即装）、插件中心（分类筛选 + 搜索 + 排序 + 分页卡片）。
 import { computed, ref, watch } from 'vue';
-import { Refresh, Switch } from '@element-plus/icons-vue';
+import { Refresh, Switch, Delete, TopRight, Download, RefreshLeft, ArrowDown } from '@element-plus/icons-vue';
 import {
   pluginStore,
   CATALOG_CATEGORIES,
@@ -161,25 +161,28 @@ function statsText(item) {
             <el-tag v-if="!view || !view.active_kernel" type="warning" size="small" effect="plain">无活动内核</el-tag>
             <template v-if="row.quarantined">
               <el-tag type="warning" size="small" effect="dark">已停用</el-tag>
-              <el-button size="small" text :disabled="globalBusy" @click="resolvePluginQuarantine(row.id, 'enable')">
+              <el-button size="small" text :icon="RefreshLeft" :disabled="globalBusy" @click="resolvePluginQuarantine(row.id, 'enable')">
                 恢复启用
               </el-button>
             </template>
             <template v-if="row.latest_version">
               <el-tag type="warning" size="small" effect="plain">有更新 {{ row.latest_version }}</el-tag>
-              <el-button v-if="!row.pinned" size="small" type="primary" :disabled="globalBusy" @click="updatePlugin(row.id)">
+              <el-button v-if="!row.pinned" size="small" type="primary" :icon="Download" :disabled="globalBusy" @click="updatePlugin(row.id)">
                 更新
               </el-button>
             </template>
-            <el-button
-              size="small"
-              text
+            <!-- 物化模式开关：开=复制、关=链接；切换走 plugin_set_mode 长任务，
+                 状态以 row.desired_mode 为准，命令完成刷新后才翻转。 -->
+            <el-switch
+              :model-value="row.desired_mode === 'copy'"
+              inline-prompt
+              active-text="复制"
+              inactive-text="链接"
               :disabled="globalBusy"
-              @click="setPluginMode(row.id, row.desired_mode === 'copy' ? 'link' : 'copy')"
-            >
-              {{ row.desired_mode === 'copy' ? '切换为链接' : '切换为复制' }}
-            </el-button>
-            <el-button v-if="row.repo_url" size="small" text @click="openExternal(row.repo_url)">仓库</el-button>
+              style="width: 58px; flex-shrink: 0"
+              @change="(v) => setPluginMode(row.id, v ? 'copy' : 'link')"
+            />
+            <el-button v-if="row.repo_url" size="small" text :icon="TopRight" @click="openExternal(row.repo_url)">仓库</el-button>
             <el-popconfirm
               title="确认卸载该插件？"
               confirm-button-text="卸载"
@@ -188,7 +191,7 @@ function statsText(item) {
               @confirm="uninstallPlugin(row.id)"
             >
               <template #reference>
-                <el-button size="small" type="danger" plain :disabled="globalBusy">卸载</el-button>
+                <el-button size="small" type="danger" plain :icon="Delete" :disabled="globalBusy">卸载</el-button>
               </template>
             </el-popconfirm>
           </span>
@@ -283,11 +286,11 @@ function statsText(item) {
               </el-tag>
             </span>
             <span class="catalog-actions">
-              <el-button v-if="detailUrl(item)" size="small" text @click="openExternal(detailUrl(item))">
+              <el-button v-if="detailUrl(item)" size="small" text :icon="TopRight" @click="openExternal(detailUrl(item))">
                 打开详情
               </el-button>
               <el-button v-if="isInstalled(item, keys)" size="small" disabled>已安装</el-button>
-              <el-button v-else size="small" type="primary" :disabled="globalBusy" @click="installPlugin(item.spec)">
+              <el-button v-else size="small" type="primary" :icon="Download" :disabled="globalBusy" @click="installPlugin(item.spec)">
                 安装
               </el-button>
             </span>
@@ -296,7 +299,7 @@ function statsText(item) {
       </TransitionGroup>
 
       <div v-if="hasMore" class="catalog-more">
-        <el-button text @click="showMore">显示更多</el-button>
+        <el-button text :icon="ArrowDown" @click="showMore">显示更多</el-button>
       </div>
     </div>
   </section>

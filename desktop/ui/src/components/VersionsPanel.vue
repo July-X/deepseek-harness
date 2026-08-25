@@ -2,7 +2,7 @@
 // 内核版本：左列已安装（切换 / 删除），右列 npm 发布（安装 / 切换）。
 // 「检查更新」从 npm registry 拉取版本列表。
 import { computed } from 'vue';
-import { Refresh } from '@element-plus/icons-vue';
+import { Refresh, Download, Promotion, Delete } from '@element-plus/icons-vue';
 import { store, checkUpdates, installVersion, activateVersion, removeVersion } from '../store.js';
 import { globalBusy, isLoading } from '../loading.js';
 
@@ -54,6 +54,7 @@ const installedVersions = computed(() => {
                       size="small"
                       type="danger"
                       plain
+                      :icon="Delete"
                       :loading="isLoading('remove:' + v.version)"
                       :disabled="globalBusy"
                     >
@@ -86,6 +87,7 @@ const installedVersions = computed(() => {
                   v-if="!installedVersions.has(r.version)"
                   size="small"
                   type="primary"
+                  :icon="Download"
                   :disabled="globalBusy"
                   @click="installVersion(r.version)"
                 >
@@ -94,6 +96,7 @@ const installedVersions = computed(() => {
                 <el-button
                   v-else-if="!kernel || kernel.active !== r.version"
                   size="small"
+                  :icon="Promotion"
                   :loading="isLoading('activate:' + r.version)"
                   :disabled="globalBusy"
                   @click="activateVersion(r.version)"

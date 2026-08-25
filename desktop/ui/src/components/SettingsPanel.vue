@@ -51,7 +51,8 @@ function onSave() {
           <el-input-number v-model="port" :min="1024" :max="65535" :precision="0" controls-position="right" />
         </el-form-item>
         <el-form-item label="插件接线 profile 名">
-          <el-input v-model="profile" placeholder="web" spellcheck="false" style="max-width: 240px" />
+          <!-- 固定值，不允许修改：保存设置时原样回传当前配置（默认 web）。 -->
+          <code class="profile-fixed">{{ profile || 'web' }}</code>
         </el-form-item>
       </el-form>
       <div class="btn-row">

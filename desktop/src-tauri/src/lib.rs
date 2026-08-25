@@ -112,6 +112,7 @@ pub fn run() {
             commands::start_kernel,
             commands::stop_kernel,
             commands::open_harness,
+            commands::open_log_window,
             commands::focus_main_shell,
             commands::plugin_status,
             commands::plugin_install,

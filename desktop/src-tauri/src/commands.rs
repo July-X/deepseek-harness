@@ -57,7 +57,7 @@ pub struct StatusView {
 
 /// Read a bounded tail of a text file for display — moved to
 /// [`crate::process::read_tail`] so the boot guard reads the same way.
-
+///
 /// The web-app level error prefix the UI must not swallow.
 fn app_err(data_dir: &Path, e: impl std::fmt::Display) -> String {
     format!("{e}（数据目录：{}）", data_dir.display())
@@ -342,21 +342,19 @@ pub async fn install_kernel(
         let mut send = move |msg: &str| {
             let _ = on_event_for_start.send(msg.to_string());
         };
-        let start_result = tauri::async_runtime::spawn_blocking(move || -> Result<
-            (guard::StartReport, Option<Child>),
-            String,
-        > {
-            let settings = settings::load(&dir_for_start);
-            let (_, pnpm_exe) =
-                promise_pnpm(&dir_for_start, &node_info_for_start, &mut send)?;
-            let deps = guard::GuardDeps {
-                data_dir: &dir_for_start,
-                settings: &settings,
-                node_path: &node_path,
-                pnpm_exe: &pnpm_exe,
-            };
-            Ok(guard::guarded_start(&deps, &mut send))
-        })
+        let start_result = tauri::async_runtime::spawn_blocking(
+            move || -> Result<(guard::StartReport, Option<Child>), String> {
+                let settings = settings::load(&dir_for_start);
+                let (_, pnpm_exe) = promise_pnpm(&dir_for_start, &node_info_for_start, &mut send)?;
+                let deps = guard::GuardDeps {
+                    data_dir: &dir_for_start,
+                    settings: &settings,
+                    node_path: &node_path,
+                    pnpm_exe: &pnpm_exe,
+                };
+                Ok(guard::guarded_start(&deps, &mut send))
+            },
+        )
         .await
         .map_err(|e| e.to_string())?;
         let (report, child) = start_result?;
@@ -603,6 +601,51 @@ pub fn open_harness(app: AppHandle) -> Result<(), String> {
             #[cfg(debug_assertions)]
             if let Ok(window) = app.get_webview_window("harness").ok_or("no harness window") {
                 window.open_devtools();
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open a log file in a dedicated, resizable viewer window.
+///
+/// The management window is fixed at 480×800 (tauri.conf.json), so the log
+/// panel's「全屏」按钮 hands reading to its own OS window instead of
+/// stretching an in-page dialog. Construction mirrors `open_harness`: the
+/// webview is built on a fresh thread because doing so on the main thread
+/// deadlocks on Windows. An existing viewer is destroyed and recreated so
+/// opening another file needs no cross-window messaging; the window is
+/// read-only, so a dropped viewer loses nothing.
+///
+/// The page is the same SPA: `ui/src/main.js` mounts the standalone viewer
+/// instead of the management shell when `?log=<name>` is present, and the
+/// viewer calls `read_log_file` itself (capability `log-viewer.json` grants
+/// only that command). The name gets `read_log_file`'s validation here too,
+/// so a bad name fails before a window appears.
+#[tauri::command]
+pub fn open_log_window(app: AppHandle, name: String) -> Result<(), String> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(format!("非法的日志文件名：{name}"));
+    }
+    if let Some(existing) = app.get_webview_window("log-viewer") {
+        let _ = existing.destroy();
+    }
+    let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+    let handle = app.clone();
+    std::thread::Builder::new()
+        .name("dsh-open-log-viewer".into())
+        .spawn(move || {
+            let result = WebviewWindowBuilder::new(
+                &handle,
+                "log-viewer",
+                WebviewUrl::App(format!("index.html?log={encoded}").into()),
+            )
+            .title(format!("日志 - {name}"))
+            .inner_size(960.0, 720.0)
+            .resizable(true)
+            .build();
+            if let Err(e) = result {
+                eprintln!("dsh-desktop: failed to open log viewer window: {e}");
             }
         })
         .map_err(|e| e.to_string())?;

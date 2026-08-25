@@ -16,8 +16,9 @@ const INSTALL_LOG_MAX_LINES = 400;
 let logLines = [];
 let logScheduled = false;
 
-function stripAnsi(text) {
-  // CSI（ESC [ ... 字母）、OSC（ESC ] ... BEL/ESC\）与孤立的 ESC 序列。
+// CSI（ESC [ ... 字母）、OSC（ESC ] ... BEL/ESC\）与孤立的 ESC 序列。
+// 日志面板与独立阅读窗口共用：磁盘文件保留原始 ANSI，展示前剥离。
+export function stripAnsi(text) {
   return text
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')

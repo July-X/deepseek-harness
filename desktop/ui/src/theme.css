@@ -143,6 +143,21 @@ body.dev-build .sidebar {
   background-image: linear-gradient(to bottom, rgba(255, 45, 48, 0.16), rgba(255, 45, 48, 0));
 }
 
+/* release 构建：窗口顶部（OS 标题栏正下方、鲸眼脉冲轨道那一条）洗一层
+   淡出绿色渐变——用状态点呼吸的绿（#34d399）但压得更淡，常亮标识
+   「这是正式版」。fixed + pointer-events:none 叠在品牌区上方，不挡点击；
+   rel-build 由首个状态帧落下后设置。 */
+body.rel-build::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 64px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(52, 211, 153, 0.1), rgba(52, 211, 153, 0));
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -374,12 +389,21 @@ main {
   color: var(--text);
 }
 
+/* 卡片头与下方内容的分隔：底线 + 留白，让「标题 + 操作区」读起来是一个
+   独立的头部区块。裸 h2 的卡片（概览 / 设置）与 card-head 结构同待遇。 */
 .card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card > h2 {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
 }
 
 .head-meta {
@@ -895,6 +919,10 @@ main {
   }
 }
 
+/* 标题栏鲸眼脉冲：业务活动指示器。默认隐藏（opacity 0、无动画），
+   仅当按钮触发的 IO / 启动编排进行中（body.pulse-active，由 App.vue
+   按 loading.js 的 ioActive + store.starting 驱动）时两道扫光开跑，
+   全部结束后动画摘除、脉冲淡出消失。两道扫光错开半周期保持连续。 */
 body::after {
   content: '';
   position: fixed;
@@ -904,6 +932,7 @@ body::after {
   width: 38%;
   z-index: 1000;
   pointer-events: none;
+  opacity: 0;
   background: linear-gradient(
     90deg,
     transparent 0%,
@@ -914,7 +943,6 @@ body::after {
   );
   filter: blur(0.4px);
   border-radius: 999px;
-  animation: titlebar-pulse-sweep 7.68s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   box-shadow: 0 0 8px rgba(255, 45, 48, 0.45);
 }
 
@@ -927,6 +955,7 @@ body > [data-titlebar-pulse='2'] {
   width: 38%;
   z-index: 1000;
   pointer-events: none;
+  opacity: 0;
   background: linear-gradient(
     90deg,
     transparent 0%,
@@ -937,9 +966,16 @@ body > [data-titlebar-pulse='2'] {
   );
   filter: blur(0.4px);
   border-radius: 999px;
+  box-shadow: 0 0 8px rgba(255, 45, 48, 0.45);
+}
+
+body.pulse-active::after {
+  animation: titlebar-pulse-sweep 7.68s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+body.pulse-active > [data-titlebar-pulse='2'] {
   animation: titlebar-pulse-sweep 7.68s cubic-bezier(0.4, 0, 0.2, 1) infinite;
   animation-delay: 3.84s;
-  box-shadow: 0 0 8px rgba(255, 45, 48, 0.45);
 }
 
 /* --- 日志面板（顶部贴合的弹层） --- */
@@ -955,6 +991,45 @@ body > [data-titlebar-pulse='2'] {
   min-height: 320px;
 }
 
+/* 独立日志阅读窗口（index.html?log=<name>，LogViewerWindow.vue）：
+   可缩放 OS 窗口，页头 = 文件名 + 刷新 / 关闭，正文贴满剩余空间。 */
+.logwin {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.logwin-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.logwin-title {
+  font-weight: 700;
+  font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.logwin-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 12px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  padding: 12px 14px;
+}
+
 .log-tabs {
   flex-shrink: 0;
   width: 168px;
@@ -962,6 +1037,56 @@ body > [data-titlebar-pulse='2'] {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  transition: width 0.2s ease;
+}
+
+/* 收缩态：细轨只留展开按钮，宽度让位给日志正文。 */
+.log-tabs.collapsed {
+  width: 34px;
+  align-items: center;
+  overflow: hidden;
+}
+
+.rail-toggle {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+
+.rail-toggle:hover {
+  color: var(--text);
+  border-color: rgba(79, 140, 255, 0.5);
+}
+
+.rail-toggle:active {
+  transform: scale(0.92);
+}
+
+.log-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 侧栏收缩时正文上方标注当前日志文件名。 */
+.log-active-name {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .log-tab {
@@ -1137,24 +1262,14 @@ body > [data-titlebar-pulse='2'] {
     padding: 6px 10px;
     font-size: 13px;
   }
-  /* 横向菜单的激活指示条从左侧竖条换成底部横条。 */
-  .menu-item.active::before {
-    left: 10px;
-    right: 10px;
-    top: auto;
-    bottom: 1px;
-    width: auto;
-    height: 3px;
+  /* 窄布局菜单激活态：只用文字高亮（品牌蓝 + 加粗），不要底线与背景。 */
+  .menu-item.active {
+    background: transparent;
+    color: var(--accent);
+    font-weight: 600;
   }
-  @keyframes menu-indicator-in {
-    from {
-      transform: scaleX(0.2);
-      opacity: 0;
-    }
-    to {
-      transform: scaleX(1);
-      opacity: 1;
-    }
+  .menu-item.active::before {
+    display: none;
   }
   .menu-badge {
     margin-left: 2px;

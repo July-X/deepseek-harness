@@ -11,6 +11,11 @@ const busyCount = ref(0);
 
 export const globalBusy = computed(() => busyCount.value > 0);
 
+// 业务活动信号：任何按钮触发的 IO（withLoading 快速操作 / withProgress
+// 长任务的 setBusy）在进行时为 true，驱动标题栏鲸眼脉冲的显隐。
+// 后台轮询（pollStatus / 静默自检）不经过这两条路径，不会点亮脉冲。
+export const ioActive = computed(() => busyCount.value > 0 || loadingMap.size > 0);
+
 export function isLoading(key) {
   return loadingMap.get(key) === true;
 }

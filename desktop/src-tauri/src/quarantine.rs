@@ -64,7 +64,8 @@ pub fn save(data_dir: &Path, doc: &Quarantine) -> Result<(), AppError> {
     fs::create_dir_all(data_dir).map_err(|e| AppError::Io(e.to_string()))?;
     let mut normalized = doc.clone();
     normalized.schema_version = SCHEMA_VERSION;
-    let text = serde_json::to_string_pretty(&normalized).map_err(|e| AppError::Io(e.to_string()))?;
+    let text =
+        serde_json::to_string_pretty(&normalized).map_err(|e| AppError::Io(e.to_string()))?;
     fs::write(file_path(data_dir), text + "\n").map_err(|e| AppError::Io(e.to_string()))
 }
 
@@ -117,7 +118,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "dsh-quarantine-test-missing-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let _ = fs::remove_dir_all(&dir);
         assert!(load(&dir).items.is_empty());
@@ -130,7 +134,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "dsh-quarantine-test-roundtrip-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let _ = fs::remove_dir_all(&dir);
 
@@ -145,7 +152,10 @@ mod tests {
         add_all(&dir, &[updated]).expect("upsert");
         let doc = load(&dir);
         assert_eq!(doc.items.len(), 2);
-        assert_eq!(doc.items.iter().find(|i| i.id == "a").unwrap().reason, "新原因");
+        assert_eq!(
+            doc.items.iter().find(|i| i.id == "a").unwrap().reason,
+            "新原因"
+        );
         assert_eq!(doc.schema_version, SCHEMA_VERSION);
 
         remove(&dir, "a").expect("remove");
@@ -160,7 +170,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "dsh-quarantine-test-garbage-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&dir).expect("mkdir");
         fs::write(file_path(&dir), "{not json").expect("write garbage");

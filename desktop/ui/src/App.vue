@@ -1,9 +1,10 @@
 <script setup>
 // 应用骨架：侧栏 + 面板切换 + 全局浮层（进度 / 日志 / 事故），
 // 以及启动时的事件监听、轮询与静默自检的编排。
-import { onMounted, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue';
 import { invoke, listen } from './bridge.js';
 import { toastError, confirmDialog } from './notify.js';
+import { ioActive } from './loading.js';
 import {
   store,
   refreshAll,
@@ -30,6 +31,41 @@ const PANELS = {
   skills: SkillsPanel,
   settings: SettingsPanel,
 };
+
+// 标题栏鲸眼脉冲 = 业务活动指示：按钮触发的 IO（withLoading / withProgress）
+// 或工作台启动编排进行中时点亮，全部结束后消失。后台轮询与静默自检不点亮。
+//
+// 扫光周期 7.68s、前 ~15%（约 1.15s）还在左侧淡入——若操作几百毫秒就完成，
+// 脉冲会在扫进可视区之前被摘除（点了像没反应）。所以点亮后至少保持一个
+// 最小可见窗口；操作本身超过该窗口时结束即消失。
+const PULSE_MIN_MS = 2400;
+
+const pulseOn = ref(false);
+let pulseActivatedAt = 0;
+let pulseOffTimer = null;
+
+const busySignal = computed(() => ioActive.value || store.starting);
+watch(busySignal, (active) => {
+  if (active) {
+    pulseActivatedAt = Date.now();
+    if (pulseOffTimer) {
+      clearTimeout(pulseOffTimer);
+      pulseOffTimer = null;
+    }
+    pulseOn.value = true;
+    return;
+  }
+  if (!pulseOn.value) return;
+  const remain = Math.max(0, PULSE_MIN_MS - (Date.now() - pulseActivatedAt));
+  pulseOffTimer = setTimeout(() => {
+    pulseOffTimer = null;
+    pulseOn.value = false;
+  }, remain);
+});
+
+watchEffect(() => {
+  document.body.classList.toggle('pulse-active', pulseOn.value);
+});
 
 let pollTimer = null;
 const startupTimers = [];

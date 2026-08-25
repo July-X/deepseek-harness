@@ -2,7 +2,7 @@
 // 启动容错事故面板：工作台启动失败被自动屏蔽后，把裁决权交给用户——
 // 每个嫌疑对象可展开错误证据，并选择移除 / 重新启用；直接关闭即保持禁用。
 import { computed, reactive } from 'vue';
-import { Document, Close } from '@element-plus/icons-vue';
+import { Document, Close, RefreshLeft, Delete, View, Hide } from '@element-plus/icons-vue';
 import { store } from '../store.js';
 import { resolvePluginQuarantine } from '../plugins.js';
 import { showLogs } from '../logs.js';
@@ -64,7 +64,7 @@ async function resolveSuspect(id, action) {
           </div>
 
           <div v-if="suspect.evidence" class="suspect-evidence">
-            <el-button size="small" text @click="toggleEvidence(suspect.id)">
+            <el-button size="small" text :icon="expanded.has(suspect.id) ? Hide : View" @click="toggleEvidence(suspect.id)">
               {{ expanded.has(suspect.id) ? '收起证据' : '错误证据' }}
             </el-button>
             <pre v-if="expanded.has(suspect.id)">{{ suspect.evidence }}</pre>
@@ -72,7 +72,7 @@ async function resolveSuspect(id, action) {
           <p v-else class="muted" style="margin: 0">该插件没有直接的日志证据（安全模式批量停用时无具体归因）。</p>
 
           <div v-if="suspect.kind === 'plugin'" class="btn-row suspect-actions">
-            <el-button size="small" text @click="resolveSuspect(suspect.id, 'enable')">重新启用</el-button>
+            <el-button size="small" text :icon="RefreshLeft" @click="resolveSuspect(suspect.id, 'enable')">重新启用</el-button>
             <el-popconfirm
               title="确认移除该插件？"
               confirm-button-text="移除"
@@ -81,7 +81,7 @@ async function resolveSuspect(id, action) {
               @confirm="resolveSuspect(suspect.id, 'remove')"
             >
               <template #reference>
-                <el-button size="small" type="danger" plain>移除插件</el-button>
+                <el-button size="small" type="danger" plain :icon="Delete">移除插件</el-button>
               </template>
             </el-popconfirm>
             <span class="muted" style="font-size: 12px">不做操作即保持禁用</span>

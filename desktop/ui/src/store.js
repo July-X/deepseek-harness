@@ -48,6 +48,7 @@ export async function refreshAll() {
     lastRunning = view.kernel.running;
     store.lastIncident = view.last_incident || null;
     document.body.classList.toggle('dev-build', !!view.dev_build);
+    document.body.classList.toggle('rel-build', !view.dev_build);
     await Promise.all([refreshPlugins(), refreshSkills()]);
   } catch (e) {
     toastError('读取状态失败：' + e);
@@ -64,6 +65,7 @@ export async function pollStatus() {
     store.view = view;
     store.lastIncident = view.last_incident || null;
     document.body.classList.toggle('dev-build', !!view.dev_build);
+    document.body.classList.toggle('rel-build', !view.dev_build);
     if (changed && view.kernel.running && !store.starting) {
       toastSuccess('内核已就绪', 2500);
     }

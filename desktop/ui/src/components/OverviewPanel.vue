@@ -13,6 +13,7 @@ import {
   Box,
   Warning,
   Connection,
+  View,
 } from '@element-plus/icons-vue';
 import {
   store,
@@ -159,7 +160,7 @@ function goVersions() {
           <h3>启动容错已介入</h3>
           <p>{{ guardText }}</p>
           <div class="btn-row">
-            <el-button size="small" type="warning" plain @click="showIncident(store.lastIncident)">
+            <el-button size="small" type="warning" plain :icon="View" @click="showIncident(store.lastIncident)">
               查看详情
             </el-button>
             <el-button size="small" text :icon="Connection" @click="store.activePanel = 'plugins'">
