@@ -73,6 +73,10 @@ const root = elements["dsh-shell-launcher"];
 if (!root) throw new Error("widget root was not injected");
 const style = elements["dsh-shell-launcher-style"];
 if (!style || !style._text.includes("#dsh-shell-launcher")) throw new Error("style not injected");
+// Light mode must not keep the translucent-white glass: the sheet needs an
+// explicit override keyed on the workbench theme marker (data-ds-dark-theme).
+if (!style._text.includes("body:not([data-ds-dark-theme])")) throw new Error("light-mode override missing");
+if (!style._text.includes("--dsh-launcher-bulb-stroke: #a16207")) throw new Error("light-mode bulb stroke missing");
 
 const btn = root.children[0];
 if (btn.tag !== "button") throw new Error("launcher is not a button");
