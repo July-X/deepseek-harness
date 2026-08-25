@@ -260,6 +260,30 @@ fn merge_extra_path(base: &str, extra: &[&Path]) -> String {
     out
 }
 
+/// Read a bounded tail of a text file for display. Missing or unreadable
+/// files yield an empty string — callers render tails next to live state
+/// and must not turn a vanished log into an error dialog.
+pub(crate) fn read_tail(path: &Path, max_bytes: u64) -> String {
+    let Ok(meta) = fs::metadata(path) else {
+        return String::new();
+    };
+    let Ok(file) = fs::File::open(path) else {
+        return String::new();
+    };
+    use std::io::{Read, Seek};
+    let mut reader = file;
+    let offset = meta.len().saturating_sub(max_bytes);
+    // `Vec::with_capacity` cannot infer its element type until something
+    // pins it; without the annotation `reader.read_to_end(&mut buf)` later
+    // in this function needs the explicit hint.
+    let mut buf: Vec<u8> = Vec::with_capacity(max_bytes as usize);
+    if offset > 0 {
+        let _ = reader.seek(io::SeekFrom::Start(offset));
+    }
+    let _ = reader.read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 fn reap(mut child: Child) -> io::Result<ExitStatus> {
     // On Windows `ComSpec /C` makes cmd.exe the direct child and the real
     // program its grandchild; waiting on cmd only returns after the

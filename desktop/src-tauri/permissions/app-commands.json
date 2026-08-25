@@ -37,6 +37,12 @@
           "plugin_set_mode",
           "plugin_check_updates",
           "plugin_catalog",
+          "skill_status",
+          "skill_install",
+          "skill_update",
+          "skill_uninstall",
+          "skill_set_enabled",
+          "skill_check_updates",
           "confirm_close_shell"
         ]
       }

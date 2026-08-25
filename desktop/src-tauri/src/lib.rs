@@ -8,10 +8,12 @@
 mod commands;
 mod env;
 mod error;
+mod guard;
 mod kernel;
 mod node;
 mod plugins;
 mod process;
+mod quarantine;
 mod registry;
 mod releases;
 mod settings;
@@ -119,13 +121,13 @@ pub fn run() {
             commands::plugin_set_mode,
             commands::plugin_check_updates,
             commands::plugin_catalog,
+            commands::plugin_resolve,
             commands::skill_status,
             commands::skill_install,
             commands::skill_update,
             commands::skill_uninstall,
             commands::skill_set_enabled,
             commands::skill_check_updates,
-            commands::skill_catalog,
             commands::focus_main_shell,
             commands::confirm_close_shell,
         ])

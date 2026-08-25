@@ -34,15 +34,6 @@ const STORE_SUBDIR: &str = "skills-store";
 const STORE_FILE: &str = "store.json";
 /// Per-package fetch marker inside each store entry.
 const SOURCE_MARKER: &str = ".dsh-source.json";
-/// Community catalog source. Same hub as the plugin center; the feed is
-/// expected in one of the two plugin-catalog shapes (hub array or market
-/// `{items:[...]}`). An unreachable or empty feed degrades to an empty
-/// catalog instead of an error — the UI renders guidance for that state.
-const CATALOG_URL: &str = "https://dsh-plugin.org/api/skills.zh.json";
-/// Catalog cache file under the shell data dir.
-const CATALOG_CACHE_FILE: &str = "skills-catalog.json";
-/// Catalog cache freshness window.
-const CATALOG_TTL_SECS: u64 = 6 * 3600;
 /// Maximum directory depth (relative to the package root, 0-based children =
 /// depth 0) at which skill bundles are detected. Covers root-level bundles
 /// plus common monorepo layouts (`skills/<name>/SKILL.md`) without walking
@@ -163,32 +154,6 @@ pub struct SkillStatus {
     pub updates: usize,
     pub last_checked_at: Option<String>,
     pub warning: Option<String>,
-}
-
-/// One catalog entry surfacing in the skill center. Shape-compatible with
-/// the plugin catalog so a shared hub feed needs no new backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillCatalogItem {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub stars: u64,
-    #[serde(default)]
-    pub verified: bool,
-    #[serde(default)]
-    pub repo: Option<String>,
-    /// Install spec: npm package name or git URL (with #tag when known).
-    pub spec: String,
-    /// npm or git, derived from the entry's install method.
-    pub origin: String,
-    #[serde(default)]
-    pub category: String,
-    #[serde(default)]
-    pub version: String,
-    /// Human-facing detail page.
-    #[serde(default)]
-    pub detail_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -623,6 +588,19 @@ fn walk_package(
         if file_name.starts_with('.') || file_name == "node_modules" {
             continue;
         }
+        // Skip symlinks entirely: a skill bundle is a real on-disk tree, so
+        // the link/copy target the shell later materializes is the entry itself.
+        // A symlink inside the package (e.g. blader/humanizer's
+        // `skills/humanizer/SKILL.md` → `../../SKILL.md`, added in v2.11.1
+        // for Claude Desktop ZIP uploads) would otherwise double-count the
+        // same skill. Following symlinks could also escape the scan-depth
+        // limit and land outside the package root.
+        if fs::symlink_metadata(&path)
+            .map(|md| md.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let rel = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -630,7 +608,12 @@ fn walk_package(
             .replace(std::path::MAIN_SEPARATOR, "/");
         if path.is_dir() {
             let skill_md = path.join("SKILL.md");
-            if skill_md.is_file() {
+            // Symlink-aware: a directory containing a symlinked SKILL.md is
+            // not a bundle even though `is_file()` would follow the link.
+            let bundle = fs::symlink_metadata(&skill_md)
+                .map(|md| md.is_file() && !md.file_type().is_symlink())
+                .unwrap_or(false);
+            if bundle {
                 match fs::read_to_string(&skill_md) {
                     Ok(text) => match parse_skill_markdown(&text) {
                         Some((name, description)) if is_kebab_case(&name) => {
@@ -1535,165 +1518,6 @@ fn check_updates_for_home(home: &Path) -> Result<Vec<SkillUpdateInfo>, AppError>
     Ok(out)
 }
 
-// --- catalog ----------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct MarketDoc {
-    #[serde(default)]
-    items: Vec<MarketRaw>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MarketRaw {
-    id: String,
-    name: String,
-    #[serde(default)]
-    package: Option<String>,
-    #[serde(default)]
-    repo: Option<String>,
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    stars: u64,
-    #[serde(default)]
-    verified: bool,
-    #[serde(default)]
-    category: String,
-}
-
-/// Hub short-key payload shape (same producer as the plugin center feed).
-#[derive(Debug, Deserialize)]
-struct HubRaw {
-    #[serde(default)]
-    s: String,
-    #[serde(default)]
-    o: String,
-    #[serde(default)]
-    n: String,
-    #[serde(default)]
-    vr: String,
-    #[serde(default)]
-    c: String,
-    #[serde(default)]
-    d: String,
-    #[serde(default)]
-    r: String,
-    #[serde(default)]
-    v: String,
-    #[serde(default)]
-    sg: u64,
-}
-
-impl HubRaw {
-    fn into_item(self) -> SkillCatalogItem {
-        let repo = (!self.r.is_empty()).then_some(self.r.clone());
-        let detail_url = if !self.o.is_empty() && !self.s.is_empty() {
-            format!("https://dsh-plugin.org/zh/skills/{}/{}", self.o, self.s)
-        } else {
-            repo.as_ref()
-                .map(|r| format!("https://github.com/{r}"))
-                .unwrap_or_default()
-        };
-        let (origin, spec) = match &repo {
-            Some(r) => ("git", format!("https://github.com/{r}.git")),
-            None => ("npm", self.n.clone()),
-        };
-        let id = if self.s.is_empty() {
-            self.n.clone()
-        } else {
-            self.s.clone()
-        };
-        SkillCatalogItem {
-            id,
-            name: self.n,
-            description: self.d,
-            stars: self.sg,
-            verified: self.v == "verified",
-            repo,
-            spec,
-            origin: origin.to_string(),
-            category: self.c,
-            version: self.vr,
-            detail_url,
-        }
-    }
-}
-
-fn market_raw_into_item(raw: MarketRaw) -> SkillCatalogItem {
-    let (origin, spec) = if let Some(package) = &raw.package {
-        ("npm", package.clone())
-    } else if let Some(repo) = &raw.repo {
-        let tag = raw.version.as_deref().filter(|v| looks_like_semver(v));
-        (
-            "git",
-            match tag {
-                Some(t) => format!("https://github.com/{repo}.git#{t}"),
-                None => format!("https://github.com/{repo}.git"),
-            },
-        )
-    } else {
-        ("git", String::new())
-    };
-    let detail_url = raw
-        .repo
-        .as_ref()
-        .map(|r| format!("https://github.com/{r}"))
-        .unwrap_or_default();
-    SkillCatalogItem {
-        id: raw.id,
-        name: raw.name,
-        description: raw.description.unwrap_or_default(),
-        stars: raw.stars,
-        verified: raw.verified,
-        repo: raw.repo,
-        spec,
-        origin: origin.to_string(),
-        category: raw.category,
-        version: raw.version.unwrap_or_default(),
-        detail_url,
-    }
-}
-
-/// Fetch the community skill catalog, caching normalized items for
-/// [`CATALOG_TTL_SECS`] (`force` bypasses the cache).
-pub fn catalog(data_dir: &Path, force: bool) -> Result<Vec<SkillCatalogItem>, AppError> {
-    let cache = data_dir.join(CATALOG_CACHE_FILE);
-    let fresh = !force
-        && fs::metadata(&cache)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|m| m.elapsed().ok().map(|e| e.as_secs() < CATALOG_TTL_SECS))
-            .unwrap_or(false);
-    if fresh {
-        if let Ok(text) = fs::read_to_string(&cache) {
-            if let Ok(items) = serde_json::from_str::<Vec<SkillCatalogItem>>(&text) {
-                return Ok(items);
-            }
-        }
-    }
-    let mut items = match http_get_string(CATALOG_URL, None) {
-        Ok(body) => {
-            if let Ok(raws) = serde_json::from_str::<Vec<HubRaw>>(&body) {
-                raws.into_iter().map(HubRaw::into_item).collect()
-            } else if let Ok(doc) = serde_json::from_str::<MarketDoc>(&body) {
-                doc.items.into_iter().map(market_raw_into_item).collect()
-            } else {
-                Vec::new()
-            }
-        }
-        Err(_) => Vec::new(),
-    };
-    if !items.is_empty() && fs::create_dir_all(data_dir).is_ok() {
-        if let Ok(text) = serde_json::to_string(&items) {
-            let _ = fs::write(&cache, text);
-        }
-    }
-    items.sort_by_key(|a| std::cmp::Reverse(a.stars));
-    Ok(items)
-}
-
 // --- reconcile --------------------------------------------------------------
 
 /// Startup repair, safe to run unconditionally:
@@ -2118,5 +1942,29 @@ mod tests {
         assert!(skills_root(&home.root()).join("move-skill").exists());
         // New skill arrived enabled.
         assert!(skills_root(&home.root()).join("added-skill").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_skips_symlinked_skill_md_to_avoid_double_counting_redirects() {
+        // Reproduce the blader/humanizer v2.11.1 packaging quirk: a real
+        // SKILL.md at the root plus a symlinked copy under `skills/<name>/`.
+        // Without the symlink-aware scan, the redirect doubles the skill and
+        // the duplicate-name check kills the install.
+        let home = TestHome::new();
+        let pkg = home.root().join("pkg");
+        fs::create_dir_all(pkg.join("skills/humanizer")).unwrap();
+        fs::write(
+            pkg.join("SKILL.md"),
+            "---\nname: humanizer\ndescription: |\n  Rewrite text that sounds AI.\n---\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../../SKILL.md", pkg.join("skills/humanizer/SKILL.md"))
+            .unwrap();
+
+        let found = scan_package_skills(&pkg, &mut |_| {}).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "humanizer");
+        assert_eq!(found[0].rel, "SKILL.md");
     }
 }

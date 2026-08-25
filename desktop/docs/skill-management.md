@@ -74,7 +74,7 @@
 以 npm/git 来源为例（本地文件夹 = 把源路径纳入中央库管理，其余相同）：
 
 1. **fetch 进中央库**：npm 取 `dist-tags.latest`（或指定版本）下载 tarball 用系统 tar 解包；git 深度克隆。写 `.dsh-source.json` 与 store.json。日志落盘 `logs/skill-<id>.log`。
-2. **扫描与校验（fail loud）**：在包内探测技能入口——任意目录下的 `SKILL.md`（探测深度 ≤3 层，覆盖根即技能与常见 monorepo 布局）及顶层平铺 `*.md`；逐个解析 frontmatter，校验 kebab-case `name` + 非 `description`。一个技能都没有 → 安装失败并给出原因；包内重名（frontmatter name 冲突）→ 整包拒绝。
+2. **扫描与校验（fail loud）**：在包内探测技能入口——任意目录下的真实 `SKILL.md`（探测深度 ≤3 层，覆盖根即技能与常见 monorepo 布局）及顶层平铺 `*.md`；逐个解析 frontmatter，校验 kebab-case `name` + 非 `description`。符号链接（含目录与 `SKILL.md` 文件）一律不视为技能入口，避免 `git clone` 保留的装饰性重定向（如 blader/humanizer v2.11.1+ 的 `skills/<name>/SKILL.md → ../../SKILL.md`）把同一技能重复计入。一个技能都没有 → 安装失败并给出原因；包内重名（frontmatter name 冲突）→ 整包拒绝。
 3. **物化到活动根**：对每个校验通过的技能，在 `<DSH_HOME>/skills/` 建 symlink（Windows junction）指向中央库内的技能目录/文件，条目名 = frontmatter `name`。链接失败自动降级 copy（差异复制，跳过未变化文件），实际模式记入 store.json。
 4. **无第 4 步**：不跑 pnpm、不改 profile——插件流程里最重的两步在这里不存在。
 5. **生效反馈**：壳探测内核端口是否在监听；运行中提示"已对工作台即时生效"，未运行提示"下次启动自动可用"。
@@ -107,9 +107,9 @@
 
 「检查更新」遍历 store.json 写回结果；UI 徽标与逐行「更新」按钮沿用插件面板。更新 = 原位重拉中央库（`.tmp-*` → `.new-*` → `.backup-*` 三段式替换）→ **重新扫描技能集合并校正物化视图**（新增补链、消失拆链并在进度里列出增删明细，幸存技能保留各自的启用状态）→ 即时生效。本地文件夹来源不做版本检查，但保留手动「重新同步」：改完源文件夹后一键重导并按同样的增删逻辑校正物化视图。
 
-## 社区目录（浏览）
+## 手动安装与社区浏览入口
 
-镜像 `plugins-catalog.json` 的缓存模式：壳从目录 URL（当前为 `https://dsh-plugin.org/api/skills.zh.json`）拉取 JSON（TTL 6 小时），面板按名称/描述搜索、一键安装、「详情」跳转仓库。条目格式与插件目录兼容——hub 短键数组或 `{items:[...]}` 两种形状都解析；源不可达或尚未部署时目录显示引导文案而非报错。官方 GitHub `dsh-skill` topic 页作为浏览入口常驻。手动安装框接受 npm spec、git URL（支持 `#tag`）、本地文件夹路径（`local:` 前缀、`~/…`、绝对路径或 Windows 盘符路径）。
+v1 只提供手动安装：与插件面板同款的「`<input>` 地址 + 回车安装」一行（`#skillSpec`，右侧 `↵` 为视觉提示），标题旁的信息图标 hover 展开支持的来源说明；placeholder 只引导 git 仓库地址（`https://github.com/owner/repo.git`、`owner/repo` 简写、追加 `#tag` 锁定版本）。`installSkill()` 与插件的 `installPlugin()` 同构；解析层（`skills.rs::parse_spec`）同时接受 npm 包名（`@scope/pkg@1.2.3`）与本地文件夹路径（绝对路径 / `~/…` / `local:` 前缀 / Windows 盘符路径），但 UI 不引导这两种来源。GitHub `dsh-skill` topic 在面板下方以链接常驻，供用户浏览社区资源后把地址粘贴到手动安装行。
 
 ## 安全边界
 
@@ -122,8 +122,8 @@
 | 位置 | 内容 |
 | --- | --- |
 | `src-tauri/src/skills.rs`（新增） | 镜像 plugins.rs 结构：store/scan/materialize/check_updates/catalog/install/update/uninstall/set_enabled/reconcile。纯文件操作，无 pnpm 构建链（仅 git/tar 子进程，走 `process::command_with_path`） |
-| `commands.rs` | `skill_status` / `skill_install` / `skill_update` / `skill_uninstall` / `skill_set_enabled` / `skill_check_updates` / `skill_catalog` 命令族，全部 async + `spawn_blocking`（精简版 `run_skill_command`：技能无需 pnpm 解析），长任务走 Channel 推进度 |
-| `ui/skills.js` + `index.html` | 技能页签：包行（名称/来源徽标/版本/更新/卸载）+ 每技能一枚可启停的 chip；目录搜索与进度面板复用既有组件与 `withPluginProgress` |
+| `commands.rs` | `skill_status` / `skill_install` / `skill_update` / `skill_uninstall` / `skill_set_enabled` / `skill_check_updates` 命令族，全部 async + `spawn_blocking`（精简版 `run_skill_command`：技能无需 pnpm 解析），长任务走 Channel 推进度 |
+| `ui/skills.js` + `index.html` | 技能页签：包行第一行「名称/来源/版本（左）+ tag 与更新/仓库/卸载按钮（右）」同行显示；不提供单技能启停 UI（卸载即停用，不单独造「启停」概念）；手动安装行复用插件同款 `install-row` 样式与 `withPluginProgress` 进度面板 |
 | `settings.rs` | 无新字段（接线点固定） |
 
 frontmatter 校验是内核规则的壳侧前置：解析器只取 frontmatter 顶层 `name` / `description`（带引号去引号），无法解析或不符合 kebab-case 的候选按"内核也会忽略"处理——安装时以警告形式展示并跳过，整包一个可用技能都没有才失败。这比内核的静默忽略更响，避免"装了却不出现"。启动对账 `skills::reconcile()`：清理三段式暂存残留、为启用技能补链/修复断链、清退停用技能的残留、清扫指向中央库但不在清单中的孤儿链接（用户手放的文件与非本库链接一律不动）；失败写入 store.warning 由面板展示。
@@ -135,3 +135,4 @@ frontmatter 校验是内核规则的壳侧前置：解析器只取 frontmatter �
 - 包内技能探测深度 ≤3 层是启发式：更深层嵌套的技能不会被识别（内核的直接一层发现本来也不覆盖它们，作者平铺即可）。
 - 项目级部署（把已装技能导出到某项目 `.dsh/skills`）留作后续方向：需要项目选择 UI 与覆盖确认，首版不做。
 - 由插件 provider 注册或 bundled root 贡献的技能不经文件系统根，不出现在面板；技能页对这些来源仅在文档中说明，不做管理。
+- 社区技能目录（按主题/分类浏览 + 一键安装）是插件中心的成熟形态，技能 v1 没复制一份独立目录，只给手动安装行与 GitHub topic 入口链接。等社区中心给技能话题上线稳定 feed，再加回缓存/搜索/分页模式与插件中心同款实现；URL 与 JSON 形状契约已在设计中预留。

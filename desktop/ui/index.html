@@ -90,12 +90,6 @@
     <symbol id="i-chevron-down" viewBox="0 0 24 24">
       <polyline points="6 9 12 15 18 9" />
     </symbol>
-    <symbol id="i-chevron-left" viewBox="0 0 24 24">
-      <polyline points="15 6 9 12 15 18" />
-    </symbol>
-    <symbol id="i-chevron-right" viewBox="0 0 24 24">
-      <polyline points="9 6 15 12 9 18" />
-    </symbol>
     <symbol id="i-x" viewBox="0 0 24 24">
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
@@ -107,6 +101,11 @@
       <path d="M12 3 2 21h20L12 3z" />
       <line x1="12" y1="10" x2="12" y2="14" />
       <line x1="12" y1="17" x2="12" y2="17" />
+    </symbol>
+    <symbol id="i-info" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" />
+      <line x1="12" y1="16" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12.01" y2="8" />
     </symbol>
   </svg>
 
@@ -199,6 +198,23 @@
             <dd id="shellVersion">—</dd>
           </dl>
           <div id="shellUpdateBanner" class="warning hidden"></div>
+          <!-- 启动容错横幅：存在被看护停用的插件或未恢复的启动事故时显示，
+               点击「查看详情」打开页面底部的事故面板。 -->
+          <div id="guardBanner" class="callout hidden" role="alert">
+            <div class="callout-icon" aria-hidden="true">
+              <svg class="icon"><use href="#i-alert" /></svg>
+            </div>
+            <div class="callout-body">
+              <h3>启动容错已介入</h3>
+              <p id="guardBannerText"></p>
+              <div class="btn-row">
+                <button id="btnGuardDetails" type="button">查看详情</button>
+                <button id="btnGuardPlugins" type="button" class="ghost">
+                  <svg class="icon"><use href="#i-plug" /></svg><span>前往插件页</span>
+                </button>
+              </div>
+            </div>
+          </div>
           <div class="btn-row">
             <button id="btnToggle" type="button">
               <svg class="icon"><use href="#i-power" /></svg><span id="btnToggleLabel">启动工作台</span>
@@ -338,58 +354,36 @@
           </div>
           <p class="muted">
             技能统一存放于 <code>~/.dsh/skills-store/</code>，以链接方式进入内核读取的
-            <code>~/.dsh/skills/</code>（链接失败自动降级复制）；启用、停用与卸载对运行中的工作台<b>即时生效</b>，无需重启。
+            <code>~/.dsh/skills/</code>（链接失败自动降级复制）；安装与卸载对运行中的工作台<b>即时生效</b>，无需重启。
           </p>
           <div id="skillWarning" class="warning hidden"></div>
           <div id="skillList" class="installed-list">
             <p class="muted">尚未安装任何技能包。</p>
           </div>
-          <p id="skillRootHint" class="muted skill-root-hint hidden"></p>
-          <h3>手动安装</h3>
-          <div class="install-row">
-            <input id="skillSpec" type="text" placeholder="npm 包名、GitHub 仓库 URL 或本地文件夹路径" spellcheck="false" />
-            <select id="skillMode" title="物化模式">
-              <option value="link">链接（默认）</option>
-              <option value="copy">复制</option>
-            </select>
-            <button id="btnSkillInstall" type="button">
-              <svg class="icon"><use href="#i-download" /></svg><span>安装</span>
-            </button>
-          </div>
-        </div>
-
-        <div class="card" id="cardSkillCatalog">
-          <div class="card-head">
-            <h2 class="card-head-with-logo">
-              <img class="brand-logo github-logo" src="https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png" alt="GitHub" />
-              <span>技能中心</span>
-            </h2>
-            <span class="head-meta">
-              <span id="skillCatalogCount" class="muted"></span>
-              <button id="btnSkillCatalogReload" type="button" class="ghost">
-                <svg class="icon"><use href="#i-refresh" /></svg><span>刷新目录</span>
-              </button>
+          <h3 class="section-divider">手动安装
+            <span class="info-tip" tabindex="0" role="button" aria-label="支持的安装来源说明">
+              <svg class="icon"><use href="#i-info" /></svg>
+              <span class="info-tip-body" role="tooltip">
+                支持以下 git 来源：<br />
+                · 仓库地址：https://github.com/owner/repo.git<br />
+                · GitHub 简写：owner/repo<br />
+                · 追加 <code>#tag</code> 可锁定版本
+              </span>
             </span>
+          </h3>
+          <div class="install-row">
+            <div class="input-with-action">
+              <input id="skillSpec" type="text" placeholder="输入后按回车键开始安装" spellcheck="false" />
+              <!-- 视觉提示，不是可点击的按钮：↵ 让用户知道「回车开始安装」，
+                   与插件手动安装行同款（见上方 pluginSpec）。 -->
+              <span class="input-hint" aria-hidden="true" title="按 Enter 开始安装">↵</span>
+            </div>
           </div>
           <p class="muted">
-            社区技能目录；也可在
+            也可以在
             <a href="https://github.com/topics/dsh-skill" target="_blank" rel="noreferrer">GitHub dsh-skill topic</a>
-            浏览后把仓库地址粘贴到上方手动安装。
+            浏览社区资源，把 git 仓库地址粘贴到上方手动安装。
           </p>
-          <div class="install-row">
-            <input id="skillCatalogQuery" type="text" placeholder="搜索技能名称、描述…" spellcheck="false" />
-            <select id="skillCatalogFilter" title="安装状态">
-              <option value="all">全部</option>
-              <option value="installed">已安装</option>
-              <option value="not-installed">未安装</option>
-            </select>
-          </div>
-          <div id="skillCatalogList" class="catalog-list"></div>
-          <div class="catalog-more">
-            <button id="btnSkillCatalogMore" type="button" class="ghost hidden">
-              <svg class="icon"><use href="#i-chevron-down" /></svg><span>显示更多</span>
-            </button>
-          </div>
         </div>
       </section>
 
@@ -448,16 +442,30 @@
           <svg class="icon"><use href="#i-x" /></svg><span>关闭</span>
         </button>
       </div>
-      <div class="log-tabs-wrap">
-        <button id="btnLogTabsPrev" type="button" class="log-tabs-arrow" title="向左滚动" aria-label="向左滚动">
-          <svg class="icon"><use href="#i-chevron-left" /></svg>
+      <div class="log-main">
+        <div id="logTabs" class="log-tabs" role="tablist" aria-orientation="vertical"></div>
+        <pre id="logContent"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- 启动容错事故面板：工作台启动失败被自动屏蔽后，把裁决权交给用户——
+       每个嫌疑对象可展开错误证据，并选择移除 / 重新启用；直接关闭即保持禁用。 -->
+  <div id="incidentModal" class="modal hidden">
+    <div class="modal-body incident-body">
+      <div class="modal-head">
+        <h2 id="incidentTitle">启动容错</h2>
+        <div class="modal-head-spacer"></div>
+        <button id="btnIncidentLogs" type="button" class="ghost">
+          <svg class="icon"><use href="#i-file-text" /></svg><span>打开日志</span>
         </button>
-        <div id="logTabs" class="log-tabs" role="tablist"></div>
-        <button id="btnLogTabsNext" type="button" class="log-tabs-arrow" title="向右滚动" aria-label="向右滚动">
-          <svg class="icon"><use href="#i-chevron-right" /></svg>
+        <button id="btnIncidentClose" type="button" class="ghost">
+          <svg class="icon"><use href="#i-x" /></svg><span>关闭</span>
         </button>
       </div>
-      <pre id="logContent"></pre>
+      <p id="incidentSummary"></p>
+      <div id="incidentSuspects" class="incident-list"></div>
+      <p id="incidentHint" class="muted hidden"></p>
     </div>
   </div>
 

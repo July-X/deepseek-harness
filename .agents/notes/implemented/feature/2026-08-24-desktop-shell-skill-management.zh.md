@@ -18,9 +18,9 @@ Status: implemented
 
 **frontmatter 由壳按顶层子集在安装前预校验。** 解析器只读顶层 `name` / `description`（含去引号）；内核会静默忽略的候选以警告形式出现在安装进度中，让用户看到「上游不会读它」而不是「装了却不出现」。整包零个可用技能时安装失败并给出原因。
 
-**暂存与崩溃恢复沿用插件词汇。** `.tmp-<pid>-<nanos>` → `.new-<…>` → `.backup-<…>` 配 `.dsh-id` 标记，启动 `reconcile()` 按 id 分组恢复。同时该函数为启用技能补断链、清退停用技能的残留条目、清扫指向中央库但不在当前清单的活动根 symlink；普通文件、目录、指向 `skills-store/` 以外的链接都是用户内容，绝不动。
+**暂存与崩溃恢复沿用插件词汇。** `.tmp-<pid>-<nanos>` → `.new-<…>` → `.backup-<…>` 配 `.dsh-id` 标记，启动 `reconcile()` 按 id 分组恢复。`.dsh-id` 标记必须在 fetch 之后写入：`git clone` 要求目标目录为空，`npm` tarball 解包会覆盖标记，`copy_tree` 又先 `remove_dir_all` 再复制——预 fetch 写入只在 npm 路径下「意外能跑通」。同时该函数为启用技能补断链、清退停用技能的残留条目、清扫指向中央库但不在当前清单的活动根 symlink；普通文件、目录、指向 `skills-store/` 以外的链接都是用户内容，绝不动。
 
-**社区目录复用插件中心的数据形态。** 单个 URL `https://dsh-plugin.org/api/skills.zh.json` 按 hub 短键数组或 `{items:[...]}` 两种形状解析；不可达或未部署的源降级为空目录加 UI 引导文案，不报错。缓存落 `<data_dir>/skills-catalog.json`，TTL 6 小时——与插件中心同样的新鲜度窗口。
+**v1 只出手动安装，不做社区目录卡。** 技能面板与插件面板同样只在手动安装行收纳 `<input>` + 物化模式 `<select>` + 安装按钮，解析同一组地址形态（npm spec、带 `#tag` 的 git URL、`owner/repo` 简写、`local:` 前缀 / 绝对路径 / `~/…` / Windows 盘符路径的本地文件夹）。GitHub `dsh-skill` topic 作为页脚链接常驻，用户在那边浏览社区资源后把地址粘贴回手动安装行。社区目录卡需要稳定的技能 hub feed，目前尚未部署——设计文档里保留 URL 常量与 hub/市场 JSON 解析形状，将来重新启用时只需在 `ui/skills.js` + `commands.rs` + `skills.rs` 做局部增量。
 
 ## 备选方案
 
@@ -39,5 +39,5 @@ Status: implemented
 - `skills::SkillStoreItem.skills[].path` 是不透明的——指向包相对路径下的 bundle 目录或平文件。上游内部布局改名不影响用户可见的 frontmatter 名，但直接遍历中央库的下游工具必须尊重这个字段。
 - 活动根条目名是 kebab-case 的 frontmatter `name`，不是 bundle 目录名。两个包都发布名为 `pdf` 的技能，只有上游项目自己解决冲突——壳拒绝单包内的 frontmatter 重复，但跨包冲突由先安装者占住链接。
 - 桌面壳在 `error.rs` 多了一个 `Skill` 错误变体（与 `Plugin` 平级），用户看到的是「技能错误：…」而不是笼统的「I/O 错误」。
-- 社区目录 URL 是占位，等中心上线技能 feed 即自动生效；缓存目录与 TTL 机制已经具备，上线那一刻功能即点亮。
+- 社区目录卡在 v1 明确不做（没有稳定的 hub feed），设计文档预留了 URL 常量与 JSON 形状，将来重新启用时只在 `ui/skills.js` + `commands.rs` + `skills.rs` 做局部增量，不是重新设计。
 - 用户文档 `desktop/README.md` 加了一条与插件管理平行的「技能管理」要项；更细的设计在 `desktop/docs/skill-management.md`，与本次改动同步更新以贴合已交付事实。

@@ -295,6 +295,13 @@ function renderPluginList() {
     const installed = (row.origin === 'npm' ? 'npm' : 'git') + ' · ' + row.installed_version;
     const upgrade = row.latest_version ? ' → ' + row.latest_version : '';
     info.appendChild(el('span', 'plugin-meta', installed + upgrade + pinNote));
+    if (row.quarantined) {
+      // 启动看护的隔离原因就地展示，用户不必回到事故面板才知道这个插件
+      // 为什么没有生效。
+      const reason = String(row.quarantined.reason || '');
+      info.appendChild(el('span', 'plugin-meta quarantine-note',
+        '已隔离：' + (reason.length > 60 ? reason.slice(0, 57) + '…' : reason)));
+    }
     item.appendChild(info);
 
     const actions = el('span', 'release-actions plugin-actions');
@@ -314,6 +321,10 @@ function renderPluginList() {
     }
     if (!pluginView || !pluginView.active_kernel) {
       actions.appendChild(el('span', 'badge warn', '无活动内核'));
+    }
+    if (row.quarantined) {
+      actions.appendChild(el('span', 'badge warn', '已停用'));
+      actions.appendChild(mkBtn('恢复启用', () => resolvePluginQuarantine(row.id, 'enable'), 'ghost'));
     }
     if (row.latest_version) {
       actions.appendChild(el('span', 'badge update', '有更新 ' + row.latest_version));
@@ -426,6 +437,20 @@ function setPluginMode(id, mode) {
       done: '已切换为' + label + '模式'
     },
     (channel) => ({ id, mode, onEvent: channel })
+  );
+}
+
+// 恢复启用（清除隔离记录并重新接线）或直接卸载被隔离的插件。
+// 与事故面板共用同一个 plugin_resolve 命令；恢复后需重启工作台生效。
+function resolvePluginQuarantine(id, action) {
+  return withPluginProgress(
+    {
+      cmd: 'plugin_resolve',
+      start: action === 'remove' ? '正在卸载插件 …' : '正在恢复插件接线 …',
+      done: action === 'remove' ? '插件已移除' : '插件已恢复，重启工作台后生效',
+      fail: action === 'remove' ? '卸载失败' : '恢复失败'
+    },
+    (channel) => ({ id, action, onEvent: channel })
   );
 }
 

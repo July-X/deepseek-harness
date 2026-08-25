@@ -17,7 +17,9 @@ use tauri::{WebviewUrl, WebviewWindowBuilder};
 use url::Url;
 
 use crate::error::AppError;
-use crate::{kernel, node, plugins, releases, settings, skills, updater};
+use crate::process::read_tail;
+use crate::quarantine;
+use crate::{guard, kernel, node, plugins, releases, settings, skills, updater};
 
 /// Shared shell state installed as a Tauri managed state.
 pub struct AppState {
@@ -43,29 +45,18 @@ pub struct StatusView {
     pub kernel: kernel::KernelStatus,
     pub node: node::NodeInfo,
     pub settings: settings::Settings,
+    /// Plugins the boot guard has disabled. The overview renders a banner
+    /// from this so a workbench running in safe mode is never silent about
+    /// what it is missing.
+    pub quarantined: Vec<quarantine::QuarantineItem>,
+    /// Most recent boot-guard incident, if any. Survives shell restarts via
+    /// `last-incident.json`, so「查看详情」keeps working after a relaunch
+    /// instead of only in the start command's response.
+    pub last_incident: Option<guard::Incident>,
 }
 
-/// Read a bounded tail of a text file for display.
-fn read_tail(path: &Path, max_bytes: usize) -> String {
-    let Ok(meta) = fs::metadata(path) else {
-        return String::new();
-    };
-    let Ok(file) = fs::File::open(path) else {
-        return String::new();
-    };
-    use std::io::{Read, Seek};
-    let mut reader = file;
-    let offset = meta.len().saturating_sub(max_bytes as u64);
-    // `Vec::with_capacity` cannot infer its element type until something
-    // pins it; without the annotation `reader.read_to_end(&mut buf)` later
-    // in this function needs the explicit hint.
-    let mut buf: Vec<u8> = Vec::with_capacity(max_bytes);
-    if offset > 0 {
-        let _ = reader.seek(std::io::SeekFrom::Start(offset));
-    }
-    let _ = reader.read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
-}
+/// Read a bounded tail of a text file for display — moved to
+/// [`crate::process::read_tail`] so the boot guard reads the same way.
 
 /// The web-app level error prefix the UI must not swallow.
 fn app_err(data_dir: &Path, e: impl std::fmt::Display) -> String {
@@ -82,6 +73,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
     tauri::async_runtime::spawn_blocking(move || {
         let settings = settings::load(&data_dir);
         let kernel_status = kernel::status(&data_dir, &settings);
+        let quarantine_doc = quarantine::load(&data_dir);
         let state = app.state::<AppState>();
         let node_info = cached_node(&state, &settings);
         StatusView {
@@ -89,6 +81,8 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
             dev_build: cfg!(debug_assertions),
             kernel: kernel_status,
             node: node_info,
+            quarantined: quarantine_doc.items,
+            last_incident: guard::load_incident(&data_dir),
             settings,
         }
     })
@@ -337,15 +331,46 @@ pub async fn install_kernel(
     }
     if !kernel::port_open(settings::load(&data_dir).port) {
         let _ = on_event.send("正在启动内核…".to_string());
-        match kernel::start_maybe(&data_dir, &node_path) {
-            Ok(Some(child)) => {
-                crate::lock(&state.running).replace(child);
-                let _ = on_event.send("内核已启动".to_string());
+        // Same guarded boot the「启动工作台」button uses: a freshly wired
+        // plugin that breaks the kernel must land in the quarantine flow,
+        // not leave the user with a crashed workbench after an install.
+        let dir_for_start = data_dir.clone();
+        let node_info_for_start = node_info;
+        // The channel stays with the outer function for the closing status
+        // messages; the guarded-start worker gets its own clone.
+        let on_event_for_start = on_event.clone();
+        let mut send = move |msg: &str| {
+            let _ = on_event_for_start.send(msg.to_string());
+        };
+        let start_result = tauri::async_runtime::spawn_blocking(move || -> Result<
+            (guard::StartReport, Option<Child>),
+            String,
+        > {
+            let settings = settings::load(&dir_for_start);
+            let (_, pnpm_exe) =
+                promise_pnpm(&dir_for_start, &node_info_for_start, &mut send)?;
+            let deps = guard::GuardDeps {
+                data_dir: &dir_for_start,
+                settings: &settings,
+                node_path: &node_path,
+                pnpm_exe: &pnpm_exe,
+            };
+            Ok(guard::guarded_start(&deps, &mut send))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let (report, child) = start_result?;
+        if let Some(child) = child {
+            register_child(&state, &data_dir, child);
+            let _ = on_event.send("内核已启动".to_string());
+        }
+        if let Some(incident) = report.incident {
+            let _ = on_event.send(incident.message);
+            for step in &incident.attempts {
+                let _ = on_event.send(format!("· {step}"));
             }
-            Ok(None) => {}
-            Err(e) => {
-                let _ = on_event.send(format!("启动失败：{e}"));
-            }
+        } else if !report.running {
+            let _ = on_event.send("内核未能启动，详情见日志".to_string());
         }
     }
     Ok(())
@@ -385,14 +410,32 @@ pub async fn remove_version(state: State<'_, AppState>, version: String) -> Resu
 
 // --- kernel lifecycle -------------------------------------------------------
 
-/// Start the active kernel. Idempotent: if the port already answers, this is
-/// a no-op so repeated clicks are harmless.
+/// Register a successfully started kernel child: record its pid for later
+/// teardown from a restarted shell and hold the handle in app state.
+fn register_child(state: &AppState, data_dir: &Path, child: Child) {
+    kernel::write_pid(data_dir, child.id());
+    crate::lock(&state.running).replace(child);
+}
+
+/// Start the active kernel under the boot guard. Idempotent: if the port
+/// already answers this is a no-op report.
+///
+/// The guard watches the spawned process until the port is ready; on a boot
+/// failure it attributes the crash to installed plugins from the kernel log,
+/// quarantines suspects (then, if needed, every third-party plugin), rewires
+/// the profile between attempts, and reports an [`guard::Incident`] either
+/// way so the UI can ask the user what to keep or remove. Progress messages
+/// stream over `on_event` because guarded retries include pnpm runs and can
+/// take a couple of minutes in the worst case.
 #[tauri::command]
-pub async fn start_kernel(app: AppHandle) -> Result<u16, String> {
+pub async fn start_kernel(
+    app: AppHandle,
+    on_event: Channel<String>,
+) -> Result<guard::StartReport, String> {
     let data_dir = app.state::<AppState>().data_dir.clone();
     // Wiring and the child spawn both block (pnpm, process creation); run
     // them on a blocking worker rather than the Tauri main thread.
-    tauri::async_runtime::spawn_blocking(move || -> Result<u16, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<guard::StartReport, String> {
         let settings = settings::load(&data_dir);
         let state = app.state::<AppState>();
         let node_info = cached_node(&state, &settings);
@@ -400,15 +443,23 @@ pub async fn start_kernel(app: AppHandle) -> Result<u16, String> {
             return Err(node_info.reason.clone());
         }
         let node_path = PathBuf::from(node_info.path.clone());
-        // 启动前校正插件接线（跳过则内核可能不加载插件；失败不阻断启动）
-        let _ = plugins::ensure_wiring_quiet(&data_dir, &settings, &node_info);
-        if let Some(child) =
-            kernel::start_maybe(&data_dir, &node_path).map_err(|e| e.to_string())?
-        {
-            kernel::write_pid(&data_dir, child.id());
-            crate::lock(&state.running).replace(child);
+        let mut send = |msg: &str| {
+            let _ = on_event.send(msg.to_string());
+        };
+        // Guarded retries rewire plugins through pnpm; resolve it up front so
+        // a missing toolchain fails before any attempt rather than mid-flow.
+        let (_, pnpm_exe) = promise_pnpm(&data_dir, &node_info, &mut send)?;
+        let deps = guard::GuardDeps {
+            data_dir: &data_dir,
+            settings: &settings,
+            node_path: &node_path,
+            pnpm_exe: &pnpm_exe,
+        };
+        let (report, child) = guard::guarded_start(&deps, &mut send);
+        if let Some(child) = child {
+            register_child(&state, &data_dir, child);
         }
-        Ok(settings.port)
+        Ok(report)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -815,6 +866,55 @@ pub async fn plugin_catalog(
         .map_err(|e| e.to_string())
 }
 
+/// Resolve one quarantined plugin after a boot incident.
+///
+/// - `remove`: full uninstall (store, kernel materializations, profile
+///   wiring); the quarantine record goes with it.
+/// - `enable`: drop the quarantine record and re-wire immediately. A running
+///   kernel keeps its current plugin set until the next restart — the UI
+///   tells the user so, because re-enabling a genuinely broken plugin will
+///   simply reproduce the boot failure on that restart (the guard runs
+///   again, nothing is lost).
+#[tauri::command]
+pub async fn plugin_resolve(
+    app: AppHandle,
+    id: String,
+    action: String,
+    on_event: Channel<String>,
+) -> Result<(), String> {
+    match action.as_str() {
+        "remove" => {
+            run_plugin_command(
+                app,
+                on_event,
+                move |data_dir, settings, pnpm_exe, progress| {
+                    plugins::uninstall(data_dir, settings, pnpm_exe, &id, progress)
+                },
+            )
+            .await
+        }
+        "enable" => {
+            let data_dir = app.state::<AppState>().data_dir.clone();
+            tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+                quarantine::remove(&data_dir, &id).map_err(|e| e.to_string())?;
+                let settings = settings::load(&data_dir);
+                let state = app.state::<AppState>();
+                let node_info = cached_node(&state, &settings);
+                // Re-wiring needs pnpm; nothing to stream since this path has
+                // no long install — only the profile resync runs.
+                let mut noop = |_: &str| {};
+                let (_, pnpm_exe) = promise_pnpm(&data_dir, &node_info, &mut noop)?;
+                plugins::ensure_wiring(&data_dir, &settings, &pnpm_exe, &mut noop)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
+        other => Err(format!("未知操作 {other:?}，支持 remove / enable")),
+    }
+}
+
 // --- skills -----------------------------------------------------------------
 
 /// Snapshot of the skill store and per-skill active-root state.
@@ -844,15 +944,14 @@ async fn run_skill_command(
 
 /// Install a skill package (npm spec, git URL, or local folder path) into
 /// the central store and materialize its skills into the kernel skill root.
-/// The running workbench picks the change up live through the kernel watcher.
+/// The running workbench picks the change up live through the kernel
+/// watcher. The shell always asks for link mode; `ensure_entry` falls back
+/// to copy on its own when symlinks are unavailable, and the actual mode
+/// is reported back to the UI through `SkillRow.actual_mode`.
 #[tauri::command]
-pub async fn skill_install(
-    spec: String,
-    mode: String,
-    on_event: Channel<String>,
-) -> Result<(), String> {
+pub async fn skill_install(spec: String, on_event: Channel<String>) -> Result<(), String> {
     run_skill_command(on_event, move |progress| {
-        skills::install(&spec, &mode, progress).map(|_| ())
+        skills::install(&spec, "link", progress).map(|_| ())
     })
     .await
 }
@@ -891,20 +990,6 @@ pub async fn skill_set_enabled(
 #[tauri::command]
 pub async fn skill_check_updates() -> Result<Vec<skills::SkillUpdateInfo>, String> {
     tauri::async_runtime::spawn_blocking(skills::check_updates)
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
-}
-
-/// The full community skill catalog; search and filtering happen in the UI
-/// over this cached list. `force` bypasses the cache window (「刷新目录」).
-#[tauri::command]
-pub async fn skill_catalog(
-    state: State<'_, AppState>,
-    force: bool,
-) -> Result<Vec<skills::SkillCatalogItem>, String> {
-    let data_dir = state.data_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || skills::catalog(&data_dir, force))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())

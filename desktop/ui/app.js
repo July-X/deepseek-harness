@@ -158,6 +158,9 @@ let currentView = null;
 // itself); initializing to false alone would misfire when the kernel was
 // already running before this page loaded.
 let lastRunning = false;
+// 最近一次启动容错事故（来自 get_status.last_incident），供概览横幅
+// 「查看详情」在 shell 重启后仍能重新打开事故面板。
+let lastIncident = null;
 
 function renderStatus(view) {
   currentView = view;
@@ -204,8 +207,112 @@ function renderStatus(view) {
     ? 'node ' + node.version + ' 满足 dsh 要求（^22.19 || >=24）'
     : node.reason);
 
+  renderGuardBanner(view);
   syncWorkbenchButtons();
 }
+
+// 启动容错横幅：有被停用的插件，或上一次启动事故未恢复时保持可见；
+// 纯状态渲染，随 2.5s 轮询刷新但只在内容变化时写 DOM（setText 已去重）。
+function renderGuardBanner(view) {
+  const quarantined = view.quarantined || [];
+  lastIncident = view.last_incident || null;
+  const banner = $('guardBanner');
+  if (!banner) return;
+  const hasUnrecovered = !!(lastIncident && !lastIncident.recovered);
+  banner.classList.toggle('hidden', quarantined.length === 0 && !hasUnrecovered);
+  if (quarantined.length > 0) {
+    setText('guardBannerText',
+      '为保证工作台可以启动，启动看护已停用以下插件：'
+      + quarantined.map((q) => q.name).join('、')
+      + '。请查看错误原因并决定移除或恢复。');
+  } else if (hasUnrecovered) {
+    setText('guardBannerText', lastIncident.message || '上次工作台启动失败。');
+  }
+}
+
+// --- incident modal ---------------------------------------------------------
+//
+// 启动看护把裁决权交给用户的界面出口：每个嫌疑对象展示可展开的错误证据，
+// 操作只有三个明确选项——移除、重新启用，或直接关闭（= 保持禁用）。
+
+function showIncident(incident) {
+  if (!incident) return;
+  $('incidentTitle').textContent = incident.recovered ? '已在安全模式下启动工作台' : '工作台启动失败';
+  $('incidentSummary').textContent = incident.message || '';
+  const box = $('incidentSuspects');
+  box.innerHTML = '';
+  const suspects = incident.suspects || [];
+  if (suspects.length === 0) {
+    box.appendChild(el('p', 'muted', '未定位到具体的嫌疑插件。'));
+  }
+  suspects.forEach((suspect) => box.appendChild(renderSuspect(suspect)));
+  // 尝试轨迹帮助用户理解看护做了什么；折叠为可展开行避免面板过长。
+  if ((incident.attempts || []).length > 1) {
+    const trail = el('details', 'incident-trail');
+    trail.appendChild(el('summary', '', '查看自动处理过程'));
+    const pre = document.createElement('pre');
+    pre.textContent = incident.attempts.join('\n');
+    trail.appendChild(pre);
+    box.appendChild(trail);
+  }
+  const hint = $('incidentHint');
+  if (incident.hint) {
+    hint.textContent = incident.hint;
+    hint.classList.remove('hidden');
+  } else {
+    hint.classList.add('hidden');
+  }
+  $('incidentModal').classList.remove('hidden');
+}
+
+function renderSuspect(suspect) {
+  const row = el('div', 'suspect-item');
+  const head = el('div', 'suspect-head');
+  head.appendChild(el('span', 'suspect-name', suspect.name));
+  head.appendChild(el('span', 'badge', suspect.kind === 'kernel' ? '内核组件' : '插件'));
+  row.appendChild(head);
+
+  if (suspect.evidence) {
+    const wrap = el('div', 'suspect-evidence');
+    const toggle = mkBtn('错误证据', () => pre.classList.toggle('hidden'), 'ghost btn-small');
+    const pre = document.createElement('pre');
+    pre.classList.add('hidden');
+    pre.textContent = suspect.evidence;
+    wrap.appendChild(toggle);
+    wrap.appendChild(pre);
+    row.appendChild(wrap);
+  } else {
+    row.appendChild(el('p', 'muted', '该插件没有直接的日志证据（安全模式批量停用时无具体归因）。'));
+  }
+
+  if (suspect.kind === 'plugin') {
+    const actions = el('div', 'btn-row suspect-actions');
+    actions.appendChild(mkBtn('重新启用', () => resolveSuspect(suspect.id, 'enable'), 'ghost'));
+    actions.appendChild(mkBtn('移除插件', (ev) => armConfirm(ev.currentTarget, {
+      armedLabel: '确认移除？',
+      idleLabel: '移除插件',
+      onConfirm: () => resolveSuspect(suspect.id, 'remove'),
+    }), 'danger'));
+    actions.appendChild(el('span', 'muted', '不做操作即保持禁用'));
+    row.appendChild(actions);
+  }
+  return row;
+}
+
+function resolveSuspect(id, action) {
+  const channel = core ? new core.Channel() : null;
+  if (channel) channel.onmessage = (msg) => appendInstallLog(msg);
+  setBusy(true);
+  return invoke('plugin_resolve', { id, action, onEvent: channel })
+    .then(() => {
+      toast(action === 'remove' ? '插件已移除' : '已恢复接线：重启工作台后生效');
+      $('incidentModal').classList.add('hidden');
+      return refreshAll();
+    })
+    .catch((e) => toast('操作失败：' + e, 6000))
+    .finally(() => setBusy(false));
+}
+
 
 // --- workbench toggle state machine -----------------------------------------
 //
@@ -503,43 +610,54 @@ function activateVersion(version) {
     .finally(() => setBusy(false));
 }
 
-// Poll until the kernel port answers; start_kernel returns right after spawn,
-// so readiness can only be observed through get_status.
-const START_TIMEOUT_MS = 60000;
-
-function waitForRunning(deadline) {
-  return invoke('get_status').then((view) => {
-    lastRunning = view.kernel.running;
-    renderStatus(view);
-    if (view.kernel.running) {
-      return true;
-    }
-    if (Date.now() > deadline) {
-      return false;
-    }
-    return new Promise((resolve) => setTimeout(resolve, 1000)).then(() => waitForRunning(deadline));
-  });
-}
-
+// 启动编排。start_kernel 现在内置启动看护：命令返回时内核端口必然已经
+// 就绪（或已给出事故报告），因此不再需要前端轮询等待；看护的重试包含
+// pnpm 重装，可能持续数分钟，阶段消息通过 channel 流入进度面板。
 function startWorkbench() {
   starting = true;
   syncWorkbenchButtons();
-  invoke('start_kernel')
-    .then(() => waitForRunning(Date.now() + START_TIMEOUT_MS))
-    .then((ready) => {
-      if (!ready) {
-        throw new Error('等待内核就绪超时（' + START_TIMEOUT_MS / 1000 + ' 秒），详情见日志');
+  const channel = core ? new core.Channel() : null;
+  if (channel) {
+    channel.onmessage = (msg) => {
+      appendInstallLog(msg);
+      setProgress(msg.length > 60 ? msg.slice(0, 57) + '…' : msg);
+    };
+  }
+  resetInstallLog();
+  setProgress('正在启动工作台…');
+  invoke('start_kernel', channel ? { onEvent: channel } : {})
+    .then((report) => {
+      if (!report || !report.running) {
+        const err = new Error((report && report.incident && report.incident.message) || '内核未能启动，详情见日志');
+        err.report = report;
+        throw err;
       }
-      return invoke('open_harness');
+      return invoke('open_harness').then(() => report);
     })
-    .then(() => toast('工作台已启动'))
+    .then((report) => {
+      hideProgress();
+      toast(report && report.incident ? '工作台已以安全模式启动' : '工作台已启动');
+      if (report && report.incident) {
+        showIncident(report.incident);
+      }
+      lastRunning = true;
+    })
     .catch((e) => {
-      toast('启动失败：' + e, 8000);
-      // 失败路径的出口：直接展示日志，无需用户再找入口。
-      showLogs();
+      // 失败路径：进度面板保持开放（约定），事故面板覆盖其上解释原因。
+      installFailed = true;
+      setProgress('启动失败：' + e.message);
+      $('progressActions').classList.remove('hidden');
+      appendInstallLog('—— 启动失败：' + e.message + ' ——');
+      toast('启动失败：' + e.message, 8000);
+      if (e.report && e.report.incident) {
+        showIncident(e.report.incident);
+      } else {
+        showLogs();
+      }
     })
     .finally(() => {
       starting = false;
+      syncWorkbenchButtons();
       refreshAll();
     });
 }
@@ -604,8 +722,8 @@ function openHarnessWindow() {
 // The modal lists every *.log file under <data_dir>/logs/ as a tab. The
 // first tab (newest file by name — `kernel.log` for live output) is read
 // when the modal opens; switching tabs is on-demand and a refresh button
-// re-reads the active tab. Tabs scroll horizontally when they don't fit
-// on the 480px window so the panel stays single-row.
+// re-reads the active tab. Tabs stack vertically in a left sidebar so the
+// strip uses the panel's height; the column scrolls when files overflow.
 
 let activeLogName = null;
 
@@ -623,7 +741,6 @@ function renderLogTabs(files, selectedName) {
     empty.className = 'log-tab-size';
     empty.textContent = '（暂无日志文件）';
     strip.appendChild(empty);
-    updateLogTabArrows();
     return;
   }
   files.forEach((f) => {
@@ -646,40 +763,21 @@ function renderLogTabs(files, selectedName) {
     btn.addEventListener('click', () => switchLogTab(f.name));
     strip.appendChild(btn);
   });
-  // Scroll the freshly-painted strip so the active tab is in view; a fresh
-  // render may have placed it off-screen on the right (or, after rotation,
-  // off-screen on the left).
+  // Scroll the freshly-painted sidebar so the active tab is in view; a
+  // fresh render may have placed it off-screen (or, after rotation, the
+  // list may have shrunk around it).
   scrollActiveLogTabIntoView();
-  updateLogTabArrows();
 }
 
-// Nudge the tab strip horizontally so the active tab is fully visible.
+// Scroll the vertical tab sidebar so the active tab is visible.
 // Called after render and after a tab switch.
 function scrollActiveLogTabIntoView() {
   const strip = $('logTabs');
   if (!strip) return;
   const active = strip.querySelector('.log-tab[aria-selected="true"]');
-  if (!active) return;
-  const stripRect = strip.getBoundingClientRect();
-  const tabRect = active.getBoundingClientRect();
-  if (tabRect.left < stripRect.left) {
-    strip.scrollBy({ left: tabRect.left - stripRect.left - 8, behavior: 'smooth' });
-  } else if (tabRect.right > stripRect.right) {
-    strip.scrollBy({ left: tabRect.right - stripRect.right + 8, behavior: 'smooth' });
+  if (active) {
+    active.scrollIntoView({ block: 'nearest' });
   }
-}
-
-// Disable the prev/next arrow buttons when the strip cannot scroll in that
-// direction. The 1-pixel slack absorbs sub-pixel rounding from fractional
-// scroll positions.
-function updateLogTabArrows() {
-  const strip = $('logTabs');
-  const prev = $('btnLogTabsPrev');
-  const next = $('btnLogTabsNext');
-  if (!strip || !prev || !next) return;
-  const max = strip.scrollWidth - strip.clientWidth;
-  prev.disabled = strip.scrollLeft <= 1;
-  next.disabled = strip.scrollLeft >= max - 1;
 }
 
 function selectLogTab(name) {
@@ -715,17 +813,7 @@ function switchLogTab(name) {
   activeLogName = name;
   selectLogTab(name);
   scrollActiveLogTabIntoView();
-  updateLogTabArrows();
   loadActiveLog();
-}
-
-// One notch of horizontal scroll for the prev/next arrow buttons. The
-// 120-px step is roughly half the visible strip on a 480-px window, which
-// keeps adjacent tabs visible after each click so the user has context.
-function nudgeLogTabs(delta) {
-  const strip = $('logTabs');
-  if (!strip) return;
-  strip.scrollBy({ left: delta, behavior: 'smooth' });
 }
 
 function refreshLogTabs() {
@@ -805,9 +893,6 @@ $('btnOpenWindow').addEventListener('click', openHarnessWindow);
 $('btnLogs').addEventListener('click', showLogs);
 $('btnLogClose').addEventListener('click', hideLogs);
 $('btnLogRefresh').addEventListener('click', () => loadActiveLog());
-$('btnLogTabsPrev').addEventListener('click', () => nudgeLogTabs(-120));
-$('btnLogTabsNext').addEventListener('click', () => nudgeLogTabs(120));
-$('logTabs').addEventListener('scroll', updateLogTabArrows, { passive: true });
 $('btnConfirmOk').addEventListener('click', () => settleConfirm(true));
 $('btnConfirmCancel').addEventListener('click', () => settleConfirm(false));
 $('btnDetectNode').addEventListener('click', detectNode);
@@ -816,6 +901,10 @@ $('btnProgressClose').addEventListener('click', closeProgress);
 $('btnShellCheck').addEventListener('click', () => checkShellUpdate(true));
 $('btnShellInstall').addEventListener('click', installShellUpdate);
 $('btnOpenDataDir').addEventListener('click', openDataDir);
+$('btnGuardDetails').addEventListener('click', () => showIncident(lastIncident));
+$('btnGuardPlugins').addEventListener('click', () => firstRunShowPanel('panelPlugins'));
+$('btnIncidentClose').addEventListener('click', () => $('incidentModal').classList.add('hidden'));
+$('btnIncidentLogs').addEventListener('click', () => showLogs());
 
 // First-run callout: both buttons lead the user toward picking and
 // installing a kernel. 「选择并安装内核」 switches to the versions panel

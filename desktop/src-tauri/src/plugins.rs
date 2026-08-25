@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::process::quiet;
+use crate::quarantine;
 use crate::releases::{http_get_bytes, http_get_string};
 use crate::version::cmp_versions;
 use crate::{commands, kernel, node, settings};
@@ -161,6 +162,9 @@ pub struct PluginRow {
     pub synced: bool,
     /// Whether the active kernel's profile already loads this plugin.
     pub wired: bool,
+    /// Quarantine record when the boot guard has disabled this plugin;
+    /// `None` means the plugin participates in wiring normally.
+    pub quarantined: Option<quarantine::QuarantineItem>,
     pub repo_url: Option<String>,
     pub description: Option<String>,
     pub installed_at: String,
@@ -1778,10 +1782,32 @@ fn is_managed_spec(spec: &str) -> bool {
     (spec.starts_with(SPEC_LINK) || spec.starts_with(SPEC_FILE)) && spec.contains(WIRED_MARK)
 }
 
+/// Filter deciding which store items take part in materialization and
+/// profile wiring. The boot guard passes exclusions here to retry a boot
+/// without specific plugins.
+pub type WiringFilter<'a> = dyn Fn(&StoreItem) -> bool + 'a;
+
+/// Reconcile the profile manifest against the store for the ACTIVE kernel,
+/// excluding plugins the quarantine registry holds (see [`crate::guard`]).
+pub fn ensure_wiring(
+    data_dir: &Path,
+    settings: &settings::Settings,
+    pnpm_exe: &Path,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<(usize, bool), AppError> {
+    let blocked = quarantine::ids(data_dir);
+    ensure_wiring_filtered(data_dir, settings, pnpm_exe, &move |item| {
+        !blocked.contains(&item.id)
+    }, on_progress)
+}
+
 /// Reconcile the profile manifest against the store for the ACTIVE kernel:
-/// set each item's dependency to the materialized dir, maintain bundle
-/// layers, rewrite specs when the active kernel changed. Runs pnpm install
-/// when the manifest changed or the profile's node_modules is missing.
+/// set each allowed item's dependency to the materialized dir, maintain
+/// bundle layers, rewrite specs when the active kernel changed. Runs pnpm
+/// install when the manifest changed or the profile's node_modules is
+/// missing. Filtered-out items are neither materialized nor wired, and their
+/// stale managed dependencies plus bundle layers are pruned — that is what
+/// lets the kernel boot without them.
 ///
 /// The manifest write is transactional: when pnpm fails the manifest is
 /// rolled back, because a bundles entry that cannot resolve crashes the
@@ -1789,10 +1815,11 @@ fn is_managed_spec(spec: &str) -> bool {
 /// plugin prunes its residue instead of leaving an unresolvable layer behind.
 ///
 /// Returns (wired_count, changed).
-pub fn ensure_wiring(
+pub fn ensure_wiring_filtered(
     data_dir: &Path,
     settings: &settings::Settings,
     pnpm_exe: &Path,
+    allow: &WiringFilter<'_>,
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(usize, bool), AppError> {
     let store = load_store(data_dir);
@@ -1800,10 +1827,12 @@ pub fn ensure_wiring(
 
     // 物化活动内核，再据插件清单决定 bundle 层；没有活动内核且仍有插件时
     // 等内核装好再接线（store 为空则继续，让下面的清退逻辑跑掉残留）。
+    // 被过滤器排除的插件（如启动看护隔离的嫌疑插件）既不物化也不进清单，
+    // 内核因此在缺少它们的状态下完成启动。
     let mut specs: BTreeMap<String, (String, bool)> = BTreeMap::new();
     match kernel::read_active(data_dir) {
         Some(active) => {
-            for item in &store.items {
+            for item in store.items.iter().filter(|item| allow(item)) {
                 refresh_store_peers(data_dir, item, &active)?;
                 let actual = materialize_one(data_dir, &active, item)?;
                 let prefix = if actual == "copy" {
@@ -1844,27 +1873,7 @@ pub fn ensure_wiring(
         write_profile_json(data_dir, &settings.profile, &root)?;
     }
     on_progress("正在同步 profile 依赖（pnpm install）");
-    let log_path = wiring_log_path(data_dir);
-    // The profile's install only needs a usable node_modules, which the
-    // existing fallback already tolerates when wiring is unchanged, so
-    // silence pnpm's ignored-builds false positive here. `pnpm_exe.parent()`
-    // is prepended to the child's PATH so any Node-shebanged lifecycle
-    // script pnpm may invoke finds the same `node` the parent used to
-    // spawn pnpm itself.
-    let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
-    let status = kernel::run_pnpm(
-        pnpm_exe,
-        &[
-            "install",
-            kernel::PNPM_REPORTER,
-            kernel::PNPM_NO_STRICT_DEP_BUILDS,
-        ],
-        &profile,
-        &log_path,
-        &[pnpm_dir],
-        &mut *on_progress,
-    )
-    .map_err(|e| AppError::Io(format!("无法运行 pnpm（{e}）")))?;
+    let status = run_profile_install(data_dir, &settings.profile, pnpm_exe, on_progress)?;
     if !status.success() {
         if changed {
             let _ = write_profile_json(data_dir, &settings.profile, &previous);
@@ -1872,10 +1881,84 @@ pub fn ensure_wiring(
         return Err(AppError::Plugin(format!(
             "pnpm install 在 profile 中失败（退出码 {:?}），已回滚 profile 配置，详情见日志：{}",
             status.code(),
-            log_path.display()
+            wiring_log_path(data_dir).display()
         )));
     }
     Ok((specs.len(), changed))
+}
+
+/// Run `pnpm install` in the named profile directory, returning its exit
+/// status so each caller applies its own rollback semantics. The flags match
+/// the store-level installs: the profile only needs a usable node_modules,
+/// which the existing artifact fallback already tolerates when pnpm reports
+/// pnpm's ignored-builds false positive. `pnpm_exe.parent()` is prepended to
+/// the child's PATH so any Node-shebanged lifecycle script finds the same
+/// `node` the parent used to spawn pnpm.
+fn run_profile_install(
+    data_dir: &Path,
+    profile_name: &str,
+    pnpm_exe: &Path,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<std::process::ExitStatus, AppError> {
+    let log_path = wiring_log_path(data_dir);
+    let pnpm_dir = pnpm_exe.parent().unwrap_or(Path::new("."));
+    kernel::run_pnpm(
+        pnpm_exe,
+        &[
+            "install",
+            kernel::PNPM_REPORTER,
+            kernel::PNPM_NO_STRICT_DEP_BUILDS,
+        ],
+        &profile_dir(data_dir, profile_name),
+        &log_path,
+        &[pnpm_dir],
+        on_progress,
+    )
+    .map_err(|e| AppError::Io(format!("无法运行 pnpm（{e}）")))
+}
+
+/// Raw text of the profile manifest, captured before the boot guard rewrites
+/// wiring so a give-up can restore exactly what the user had.
+pub fn snapshot_profile_manifest_text(data_dir: &Path, profile: &str) -> Option<String> {
+    fs::read_to_string(profile_dir(data_dir, profile).join("package.json")).ok()
+}
+
+/// Restore a previously snapshotted manifest and resync node_modules with
+/// it. A missing snapshot keeps the current manifest and only reruns the
+/// install — the best available repair when the file itself vanished.
+pub fn restore_profile_manifest(
+    data_dir: &Path,
+    settings: &settings::Settings,
+    pnpm_exe: &Path,
+    previous: Option<&str>,
+    on_progress: &mut dyn FnMut(&str),
+) -> Result<(), AppError> {
+    let path = profile_dir(data_dir, &settings.profile).join("package.json");
+    if let Some(text) = previous {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| AppError::Io(e.to_string()))?;
+        }
+        fs::write(&path, text).map_err(|e| AppError::Io(e.to_string()))?;
+    }
+    on_progress("正在恢复 profile 依赖（pnpm install）");
+    let status = run_profile_install(data_dir, &settings.profile, pnpm_exe, on_progress)?;
+    if !status.success() {
+        return Err(AppError::Plugin(format!(
+            "pnpm install 在恢复后的 profile 中失败（退出码 {:?}），详情见日志：{}",
+            status.code(),
+            wiring_log_path(data_dir).display()
+        )));
+    }
+    Ok(())
+}
+
+/// Record (or clear) the store's user-facing warning. Shared by the quiet
+/// wiring path and the boot guard's first-attempt repair so both surfaces
+/// agree on what the UI shows next to the plugin card.
+pub fn set_store_warning(data_dir: &Path, warning: Option<String>) {
+    let mut store = load_store(data_dir);
+    store.warning = warning;
+    let _ = save_store(data_dir, &store);
 }
 
 /// Quiet wiring for sync commands (kernel switch / start): failures are
@@ -1891,15 +1974,11 @@ pub fn ensure_wiring_quiet(
     let mut noop = |_: &str| {};
     match ensure_wiring(data_dir, settings, &pnpm_exe, &mut noop) {
         Ok(_) => {
-            let mut store = load_store(data_dir);
-            store.warning = None;
-            let _ = save_store(data_dir, &store);
+            set_store_warning(data_dir, None);
             Ok(())
         }
         Err(e) => {
-            let mut store = load_store(data_dir);
-            store.warning = Some(e.to_string());
-            let _ = save_store(data_dir, &store);
+            set_store_warning(data_dir, Some(e.to_string()));
             Err(e.to_string())
         }
     }
@@ -2427,6 +2506,9 @@ pub fn install(
         install_store_deps(data_dir, pnpm_exe, &item.id, on_progress)?;
     }
     upsert_item(data_dir, item.clone())?;
+    // 重装代表明确的重试意图：清掉历史隔离记录，否则新装的插件会被旧
+    // 记录挡在接线之外，表现为"装了却不生效"的哑故障。
+    let _ = quarantine::remove(data_dir, &item.id);
     sync_kernels(data_dir, &item)?;
     on_progress("正在接线到 profile");
     ensure_wiring(data_dir, settings, pnpm_exe, on_progress)?;
@@ -2467,6 +2549,8 @@ pub fn update(
     // when the remote has moved on since this fetch.
     updated.latest_version = Some(updated.installed_version.clone());
     upsert_item(data_dir, updated.clone())?;
+    // 与 install 同理：更新是明确的重试意图，历史隔离记录不再适用。
+    let _ = quarantine::remove(data_dir, &updated.id);
     sync_kernels(data_dir, &updated)?;
     on_progress("正在同步 profile");
     ensure_wiring(data_dir, settings, pnpm_exe, on_progress)?;
@@ -2487,6 +2571,9 @@ pub fn uninstall(
     }
     let _ = fs::remove_dir_all(store_plugin_dir(data_dir, id));
     remove_item(data_dir, id)?;
+    // 隔离记录随卸载一并清除：残留记录会在用户日后重装同名插件时把它挡
+    // 在接线之外，形成"装了却不生效"的哑故障。
+    quarantine::remove(data_dir, id)?;
     ensure_wiring(data_dir, settings, pnpm_exe, on_progress)?;
     Ok(())
 }
@@ -2537,10 +2624,16 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
     let profile_manifest = read_profile_json(data_dir, &settings.profile)
         .ok()
         .flatten();
+    let quarantine_doc = quarantine::load(data_dir);
 
     let mut rows = Vec::new();
     let mut updates = 0;
     for item in &store.items {
+        let quarantined = quarantine_doc
+            .items
+            .iter()
+            .find(|q| q.id == item.id)
+            .cloned();
         let (actual_mode, synced) = match &active {
             Some(version) => {
                 let meta = read_meta(data_dir, version, &item.id);
@@ -2608,6 +2701,7 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
             actual_mode,
             synced,
             wired,
+            quarantined,
             repo_url: item.repo_url.clone(),
             description: item.description.clone(),
             installed_at: item.installed_at.clone(),
@@ -3391,6 +3485,57 @@ mod tests {
         let view = status(&data_dir, &settings);
         assert_eq!(view.updates, 1);
         assert_eq!(view.rows[0].latest_version.as_deref(), Some("2.0.0"));
+    }
+
+    /// The boot guard's quarantines must surface on the plugin row so the
+    /// management UI can offer the re-enable / remove decision per plugin
+    /// instead of the user discovering a silently missing integration.
+    #[test]
+    fn status_attaches_quarantine_record_to_row() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        upsert_item(
+            &data_dir,
+            StoreItem {
+                id: "bad-plugin".into(),
+                name: "bad-plugin".into(),
+                origin: "npm".into(),
+                source: "bad-plugin".into(),
+                installed_version: "1.0.0".into(),
+                latest_version: None,
+                mode: "link".into(),
+                pinned: false,
+                installed_at: String::new(),
+                updated_at: String::new(),
+                repo_url: None,
+                description: None,
+            },
+        )
+        .expect("save");
+        quarantine::add_all(
+            &data_dir,
+            &[quarantine::QuarantineItem {
+                id: "bad-plugin".into(),
+                name: "bad-plugin".into(),
+                reason: "测试隔离".into(),
+                evidence: "Error: boom".into(),
+                at: 1,
+            }],
+        )
+        .expect("quarantine");
+
+        let view = status(&data_dir, &settings::Settings::default());
+        assert_eq!(view.rows.len(), 1);
+        let record = view.rows[0]
+            .quarantined
+            .as_ref()
+            .expect("row must carry the quarantine record");
+        assert_eq!(record.reason, "测试隔离");
+
+        // Re-enabling drops the record and with it the row flag.
+        quarantine::remove(&data_dir, "bad-plugin").expect("remove");
+        let view = status(&data_dir, &settings::Settings::default());
+        assert!(view.rows[0].quarantined.is_none());
     }
 
     /// Helper: stamp a `.dsh-id` marker inside a staging dir so the

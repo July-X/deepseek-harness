@@ -1016,17 +1016,17 @@ button.danger.armed {
 
 /* Logs panel sits at the top of the window instead of the vertical center,
    so the user sees the live output close to where they're reading the
-   overview. The body remains anchored to the top edge with a fixed height;
-   the centered modal default still applies to dialogs (confirm, install).
+   overview. The body anchors to the top edge and stretches to nearly the
+   full window height (12px margins top and bottom); the centered modal
+   default still applies to dialogs (confirm, install).
 
    `pointer-events: none` on the wrapper lets clicks pass through the empty
    space below the panel back to the underlying UI; the modal-body restores
    `pointer-events: auto` so its own buttons still receive clicks.
 
    `backdrop-filter: blur(...)` blurs whatever the panel doesn't cover — the
-   lower portion of the main UI is fully visible below the 60vh body and
-   would otherwise look stark against the dark panel above it. WKWebView
-   needs the `-webkit-` prefix. */
+   strip of main UI below the body would otherwise look stark against the
+   dark panel above it. WKWebView needs the `-webkit-` prefix. */
 .modal-top {
   display: block;
   background: rgba(4, 8, 20, 0.35);
@@ -1037,7 +1037,8 @@ button.danger.armed {
 .modal-top .modal-body {
   pointer-events: auto;
   margin: 12px auto 0;
-  max-height: 60vh;
+  /* 高度贴满窗口：顶部 12px 间距，底部同样只留 12px。 */
+  max-height: calc(100vh - 24px);
 }
 
 .modal-body {
@@ -1069,11 +1070,13 @@ button.danger.armed {
   flex: 1;
 }
 
-/* flex:1 + min-height:0 lets the log actually scroll inside the 84vh modal;
-   without it the pre grows past the fixed-height body and gets clipped. */
+/* flex:1 + min-height/min-width:0 lets the log actually scroll inside the
+   fixed-height modal; without them the pre grows past the body (or pushes
+   past the tab sidebar) and gets clipped. */
 .modal-body pre {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   margin: 0;
   padding: 16px;
   overflow: auto;
@@ -1084,65 +1087,39 @@ button.danger.armed {
   word-break: break-all;
 }
 
-/* Per-file tab strip for the logs modal. The wrap holds two arrow buttons
-   flanking a horizontally-scrollable tab strip; the arrows nudge the strip
-   one notch at a time instead of exposing a horizontal scrollbar. Tabs
-   stay on a single row regardless of how many log files exist. */
-.log-tabs-wrap {
+/* Per-file tab sidebar for the logs modal. Tabs stack vertically on the
+   left and the label text itself is typeset vertically (writing-mode),
+   so the sidebar stays a narrow strip and long file names consume panel
+   height instead of width; the column scrolls when tabs overflow. */
+.log-main {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: stretch;
-  border-bottom: 1px solid var(--border);
 }
 .log-tabs {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  gap: 4px;
-  padding: 8px 4px 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  /* Hide the strip's own scrollbar — the flanking arrow buttons drive the
-     scroll position so users don't see a horizontal scrollbar. */
-  scrollbar-width: none;
-}
-.log-tabs::-webkit-scrollbar {
-  display: none;
-}
-.log-tabs-arrow {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  padding: 0;
-  background: transparent;
-  color: var(--muted);
-  border: none;
-  cursor: pointer;
-}
-.log-tabs-arrow:hover:not(:disabled) {
-  color: var(--fg);
-  background: rgba(255, 255, 255, 0.04);
-}
-.log-tabs-arrow:disabled {
-  opacity: 0.3;
-  cursor: default;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 6px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-right: 1px solid var(--border);
 }
 .log-tab {
   flex: 0 0 auto;
-  padding: 6px 12px;
+  padding: 10px 6px;
   border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 8px;
   background: transparent;
   color: var(--muted);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  white-space: nowrap;
-  display: inline-flex;
+  writing-mode: vertical-rl;
+  display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 .log-tab:hover {
   color: var(--fg);
@@ -1150,14 +1127,13 @@ button.danger.armed {
 }
 .log-tab[aria-selected="true"] {
   color: var(--fg);
-  background: #0d1428;
-  border-color: var(--border);
-  position: relative;
-  top: 1px;
+  background: rgba(79, 140, 255, 0.12);
+  border-color: rgba(79, 140, 255, 0.4);
 }
 .log-tab-size {
   font-size: 11px;
   opacity: 0.6;
+  flex: 0 0 auto;
 }
 
 .confirm-body {
@@ -1235,6 +1211,55 @@ h3.section-divider {
   border-top: 1px solid var(--border);
 }
 
+/* 标题旁的说明图标：hover / 键盘聚焦时展开支持来源的 tooltip。
+   纯 CSS 实现，无 JS；tooltip 向 icon 右侧展开——向上居中展开时
+   「手动安装」贴近卡片左缘，窄窗口下 tooltip 左半会被裁剪。 */
+.info-tip {
+  position: relative;
+  display: inline-flex;
+  margin-left: 6px;
+  vertical-align: -2px;
+  color: var(--muted);
+  cursor: help;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.info-tip .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.info-tip-body {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  min-width: 280px;
+  padding: 10px 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 30;
+}
+
+.info-tip-body code {
+  font-size: 11px;
+}
+
+.info-tip:hover .info-tip-body,
+.info-tip:focus-visible .info-tip-body {
+  opacity: 1;
+}
+
 .install-row select {
   appearance: none;
   background: rgba(0, 0, 0, 0.3);
@@ -1304,48 +1329,30 @@ h3.section-divider {
 
 /* --- 技能管理 --- */
 
-/* One installed skill package renders as a plugin-row plus a chip list of
-   its skills; each chip carries the enable toggle for that one skill. */
-.skill-chips {
+/* 技能包行第一行：左侧包名 + 来源/版本，右侧 tag（链接/复制/有更新）
+   与操作按钮（更新/仓库/卸载），两者同行显示；窗口过窄时按钮组
+   整体换到下一行并靠右。 */
+.skill-row-head {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 12px;
 }
 
-.skill-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  padding: 4px 10px;
-  font-size: 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--muted);
+.skill-row-head .plugin-info {
+  flex: 1 1 auto;
 }
 
-.skill-chip.enabled {
-  border-color: rgba(79, 140, 255, 0.45);
-  background: rgba(79, 140, 255, 0.12);
-  color: var(--text);
+.skill-row-head .plugin-actions {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
-.skill-chip .skill-chip-name {
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.skill-chip .skill-chip-desc {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 320px;
-}
-
-.skill-root-hint {
-  font-size: 11px;
-  word-break: break-all;
+/* 已安装技能列表上方一条分割线，与卡片区隔说明文字和列表。 */
+#skillList {
+  border-top: 1px solid var(--border);
+  margin-top: 14px;
 }
 
 .catalog-desc {
