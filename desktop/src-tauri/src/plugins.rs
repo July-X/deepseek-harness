@@ -55,8 +55,6 @@ const META_SUBDIR: &str = ".meta";
 const SPEC_LINK: &str = "link:";
 /// Spec prefix for a pnpm file: (store copy) dependency.
 const SPEC_FILE: &str = "file:";
-/// Marker of shell-written dependency specs pointing at a kernel plugins dir.
-const WIRED_MARK: &str = "desktop/kernels/";
 
 // --- data model ------------------------------------------------------------
 
@@ -1057,7 +1055,9 @@ pub fn reconcile_store(data_dir: &Path) {
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        let kind = if name.starts_with(TMP_PREFIX) {
+        // `.tmp-` is the legacy pre-marker naming scheme; current staging
+        // dirs use `tmp-` / `new-` / `backup-` (see new_staging_dir).
+        let kind = if name.starts_with(TMP_PREFIX) || name.starts_with(".tmp-") {
             Kind::Tmp
         } else if name.starts_with(NEW_PREFIX) {
             Kind::New
@@ -1066,16 +1066,24 @@ pub fn reconcile_store(data_dir: &Path) {
         } else {
             continue;
         };
-        let Some(id) = fs::read_to_string(entry.path().join(ID_MARKER))
+        let marker = fs::read_to_string(entry.path().join(ID_MARKER))
             .ok()
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        else {
-            // Orphaned staging dir without an id marker (e.g. from an
-            // older shell that wrote the staging name differently).
-            // Best-effort: leave it alone so the user can inspect.
+            .filter(|s| !s.is_empty());
+        let Some(id) = marker else {
+            // Staging dir without an id marker: residue of a crash between
+            // staging-dir creation and stamping (or of an older shell that
+            // named staging differently). It is never user data — reap it
+            // instead of letting it accumulate forever.
+            let _ = fs::remove_dir_all(entry.path());
             continue;
         };
+        if id == name {
+            // A live plugin whose name starts with a staging prefix (npm
+            // allows `tmp-foo`): its final dir carries its own marker and
+            // must not be grouped as its own staging residue.
+            continue;
+        }
         by_id.entry(id).or_default().push((kind, entry.path()));
     }
 
@@ -1591,8 +1599,13 @@ pub fn materialize_one(
         );
     }
     if actual == "copy" {
-        copy_tree(&source, &target)
-            .map_err(|e| AppError::Io(format!("复制插件到内核失败：{e}")))?;
+        copy_tree(&source, &target).map_err(|e| {
+            AppError::Io(format!(
+                "复制插件 {} 到内核失败：{e}。请关闭工作台后点击「同步」重试；若持续失败请查看日志 {}",
+                item.id,
+                wiring_log_path(data_dir).display()
+            ))
+        })?;
     }
     if !target.exists() {
         return Err(AppError::Plugin(format!(
@@ -1613,19 +1626,64 @@ pub fn materialize_one(
     Ok(actual)
 }
 
+/// Remove a filesystem link (symlink) without touching its target. On
+/// Windows `DeleteFile` rejects directory symlinks with
+/// ERROR_ACCESS_DENIED — only `RemoveDirectory` removes them — while file
+/// symlinks need `DeleteFile`; trying both covers either kind on every
+/// platform. Removing the wrong way leaves the link in place, and every
+/// subsequent operation (recreate, copy) then follows it into the link
+/// target: that is how a plugin update on Windows turned into copying the
+/// store directory onto itself and failing with os error 2.
+fn remove_link(path: &Path) {
+    if fs::remove_file(path).is_err() {
+        let _ = fs::remove_dir(path);
+    }
+}
+
 /// Remove a plugin's materialization from one kernel (link or copy residue).
 fn remove_materialized(data_dir: &Path, version: &str, id: &str) {
     let target = kernel_plugin_dir(data_dir, version, id);
     match fs::symlink_metadata(&target) {
-        Ok(md) if md.file_type().is_symlink() => {
-            let _ = fs::remove_file(&target);
-        }
+        Ok(md) if md.file_type().is_symlink() => remove_link(&target),
         Ok(_) => {
             let _ = fs::remove_dir_all(&target);
         }
         Err(_) => {}
     }
     let _ = fs::remove_file(kernel_meta_file(data_dir, version, id));
+}
+
+/// Sweep kernel plugin entries the store no longer holds — uninstall
+/// residue left behind when the uninstall-time removal hit a Windows file
+/// lock, or a store dir deleted by hand. An entry is only swept when the
+/// shell provably owns it (a `.meta/<id>.json` record exists) or it is
+/// already broken (a symlink whose target vanished); anything else a user
+/// dropped into the kernel plugins dir by hand is left alone. Keyed on
+/// store membership rather than the wiring filter so quarantined plugins
+/// keep their materialization.
+fn sweep_kernel_orphans(data_dir: &Path, version: &str, store: &Store) {
+    let dir = kernel_plugins_dir(data_dir, version);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name == META_SUBDIR || store.items.iter().any(|i| i.id == name) {
+            continue;
+        }
+        let path = entry.path();
+        let dangling_link = fs::symlink_metadata(&path)
+            .ok()
+            .filter(|m| m.file_type().is_symlink())
+            .map(|_| !path.exists()) // exists() follows the link to its target
+            .unwrap_or(false);
+        let shell_owned = kernel_meta_file(data_dir, version, &name).is_file();
+        if dangling_link || shell_owned {
+            remove_materialized(data_dir, version, &name);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1638,26 +1696,106 @@ fn make_dir_link(source: &Path, target: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_dir(source, target)
 }
 
-/// Recursively copy source into target, replacing whatever exists.
+/// Recursively copy source into target, replacing whatever exists. Every
+/// IO error carries the path that failed — a bare "系统找不到指定的文件
+/// (os error 2)" out of a 20k-file `node_modules` copy is undiagnosable.
+/// Broken symlinks inside the tree are skipped with a warning instead of
+/// aborting the whole copy: on Windows a dangling link (e.g. a peer link
+/// whose kernel target moved) fails `fs::copy` with os error 2 even though
+/// everything around it is fine.
 fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
+    copy_tree_at(source, target, &mut Vec::new())
+}
+
+/// `ancestors` holds the canonical path of every directory on the current
+/// recursion stack. Copy mode follows directory links (a copied tree must
+/// not depend on link capability), and on macOS/Linux a pnpm
+/// `node_modules` is built entirely of symlinks — circular dependencies
+/// form link cycles, which are caught here by detecting that a directory's
+/// canonical path is already an ancestor. Diamonds (two links to the same
+/// sibling) are not cycles and pass.
+fn copy_tree_at(source: &Path, target: &Path, ancestors: &mut Vec<PathBuf>) -> io::Result<()> {
+    let canonical = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    if ancestors.contains(&canonical) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("目录树存在循环链接：{}", source.display()),
+        ));
+    }
+    ancestors.push(canonical);
+    let result = copy_tree_inner(source, target, ancestors);
+    ancestors.pop();
+    result
+}
+
+fn copy_tree_inner(source: &Path, target: &Path, ancestors: &mut Vec<PathBuf>) -> io::Result<()> {
     if target.is_symlink() {
-        let _ = fs::remove_file(target);
+        remove_link(target);
+        if target.is_symlink() {
+            // The link refused to go away: copying through it would write
+            // into its target (potentially the store itself).
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("无法清除旧的链接 {}，请关闭工作台后重试", target.display()),
+            ));
+        }
     } else if target.exists() {
         let _ = fs::remove_dir_all(target);
     }
-    fs::create_dir_all(target)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
+    fs::create_dir_all(target).map_err(|e| {
+        io::Error::new(e.kind(), format!("创建目录 {} 失败：{e}", target.display()))
+    })?;
+    let entries = fs::read_dir(source).map_err(|e| {
+        io::Error::new(e.kind(), format!("读取目录 {} 失败：{e}", source.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            io::Error::new(e.kind(), format!("遍历目录 {} 失败：{e}", source.display()))
+        })?;
         let from = entry.path();
         let to = target.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_tree(&from, &to)?;
+        // `file_type` does not follow links: a symlink reports as a symlink
+        // even when its target is a directory. Junctions on Windows report
+        // as plain directories and are copied through, matching the copy
+        // mode's "no link capability required" promise.
+        let file_type = entry.file_type().map_err(|e| {
+            io::Error::new(e.kind(), format!("读取 {} 的类型失败：{e}", from.display()))
+        })?;
+        if file_type.is_symlink() {
+            // Follow the link once to classify it; a dangling link cannot be
+            // copied and must not kill the whole tree.
+            match fs::metadata(&from) {
+                Ok(md) if md.is_dir() => copy_tree_at(&from, &to, ancestors)?,
+                Ok(_) => copy_file(&from, &to)?,
+                Err(e) => {
+                    eprintln!(
+                        "dsh-desktop: skipping dangling symlink {} during copy: {e}",
+                        from.display()
+                    );
+                    continue;
+                }
+            }
+        } else if file_type.is_dir() {
+            copy_tree_at(&from, &to, ancestors)?;
         } else {
-            let _ = fs::remove_file(&to);
-            fs::copy(&from, &to)?;
+            copy_file(&from, &to)?;
         }
     }
     Ok(())
+}
+
+/// Copy one file over `to`, replacing any existing entry, with both paths
+/// in the error so a failure names the exact file.
+fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
+    let _ = fs::remove_file(to);
+    fs::copy(from, to)
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("复制 {} → {} 失败：{e}", from.display(), to.display()),
+            )
+        })
+        .map(|_| ())
 }
 
 /// Materialize a plugin into every installed kernel.
@@ -1778,8 +1916,27 @@ fn ensure_profile(data_dir: &Path, profile: &str) -> Result<(), AppError> {
 
 /// Whether a profile dependency spec is one the shell wrote (points at a
 /// kernel plugins dir). Protects CLI-managed dependencies from pruning.
+///
+/// Shell specs always end in `kernels/<version>/plugins/<id>`; match that
+/// path structure rather than the data-dir name. A name-based match
+/// (`desktop/kernels/`) misreads specs written by a debug shell
+/// (`desktop-dev/`) or a `DSH_DESKTOP_DATA_DIR` override as user-managed,
+/// so uninstall then leaves the dependency and its bundle layer behind and
+/// the kernel crashes at boot resolving the dangling bundle.
 fn is_managed_spec(spec: &str) -> bool {
-    (spec.starts_with(SPEC_LINK) || spec.starts_with(SPEC_FILE)) && spec.contains(WIRED_MARK)
+    let Some(path) = spec
+        .strip_prefix(SPEC_LINK)
+        .or_else(|| spec.strip_prefix(SPEC_FILE))
+    else {
+        return false;
+    };
+    let mut segs = path.split('/').rev();
+    let (Some(id), Some("plugins"), Some(version), Some("kernels")) =
+        (segs.next(), segs.next(), segs.next(), segs.next())
+    else {
+        return false;
+    };
+    !id.is_empty() && !version.is_empty()
 }
 
 /// Filter deciding which store items take part in materialization and
@@ -1796,9 +1953,13 @@ pub fn ensure_wiring(
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(usize, bool), AppError> {
     let blocked = quarantine::ids(data_dir);
-    ensure_wiring_filtered(data_dir, settings, pnpm_exe, &move |item| {
-        !blocked.contains(&item.id)
-    }, on_progress)
+    ensure_wiring_filtered(
+        data_dir,
+        settings,
+        pnpm_exe,
+        &move |item| !blocked.contains(&item.id),
+        on_progress,
+    )
 }
 
 /// Reconcile the profile manifest against the store for the ACTIVE kernel:
@@ -1829,29 +1990,41 @@ pub fn ensure_wiring_filtered(
     // 等内核装好再接线（store 为空则继续，让下面的清退逻辑跑掉残留）。
     // 被过滤器排除的插件（如启动看护隔离的嫌疑插件）既不物化也不进清单，
     // 内核因此在缺少它们的状态下完成启动。
+    //
+    // 单个插件物化失败不中止整轮接线：失败项不进清单（manifest 随之把它
+    // 清退，内核不带它启动），其余插件照常接线，最后聚合报错。否则一个
+    // 损坏的插件会让卸载残留的清退永远跑不到，故障在 store warning 里
+    // 越积越多。
     let mut specs: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    let mut failures: Vec<String> = Vec::new();
     match kernel::read_active(data_dir) {
         Some(active) => {
             for item in store.items.iter().filter(|item| allow(item)) {
-                refresh_store_peers(data_dir, item, &active)?;
-                let actual = materialize_one(data_dir, &active, item)?;
-                let prefix = if actual == "copy" {
-                    SPEC_FILE
-                } else {
-                    SPEC_LINK
-                };
-                let rel = relative_path(
-                    &profile_dir(data_dir, &settings.profile),
-                    &kernel_plugin_dir(data_dir, &active, &item.id),
-                );
-                specs.insert(
-                    item.name.clone(),
-                    (
-                        format!("{prefix}{}", spec_path_string(&rel)),
-                        manifest_is_bundle(&kernel_plugin_dir(data_dir, &active, &item.id)),
-                    ),
-                );
+                let result = refresh_store_peers(data_dir, item, &active)
+                    .and_then(|_| materialize_one(data_dir, &active, item));
+                match result {
+                    Ok(actual) => {
+                        let prefix = if actual == "copy" {
+                            SPEC_FILE
+                        } else {
+                            SPEC_LINK
+                        };
+                        let rel = relative_path(
+                            &profile_dir(data_dir, &settings.profile),
+                            &kernel_plugin_dir(data_dir, &active, &item.id),
+                        );
+                        specs.insert(
+                            item.name.clone(),
+                            (
+                                format!("{prefix}{}", spec_path_string(&rel)),
+                                manifest_is_bundle(&kernel_plugin_dir(data_dir, &active, &item.id)),
+                            ),
+                        );
+                    }
+                    Err(e) => failures.push(format!("{}（{e}）", item.name)),
+                }
             }
+            sweep_kernel_orphans(data_dir, &active, &store);
         }
         None if !store.items.is_empty() => return Ok((0, false)),
         None => {}
@@ -1866,22 +2039,27 @@ pub fn ensure_wiring_filtered(
     // 重装，否则 bundles 里的层解析不了，内核启动即崩。
     let profile = profile_dir(data_dir, &settings.profile);
     let node_modules_missing = !profile.join("node_modules").is_dir();
-    if !changed && !node_modules_missing {
-        return Ok((specs.len(), false));
-    }
-    if changed {
-        write_profile_json(data_dir, &settings.profile, &root)?;
-    }
-    on_progress("正在同步 profile 依赖（pnpm install）");
-    let status = run_profile_install(data_dir, &settings.profile, pnpm_exe, on_progress)?;
-    if !status.success() {
+    if changed || node_modules_missing {
         if changed {
-            let _ = write_profile_json(data_dir, &settings.profile, &previous);
+            write_profile_json(data_dir, &settings.profile, &root)?;
         }
+        on_progress("正在同步 profile 依赖（pnpm install）");
+        let status = run_profile_install(data_dir, &settings.profile, pnpm_exe, on_progress)?;
+        if !status.success() {
+            if changed {
+                let _ = write_profile_json(data_dir, &settings.profile, &previous);
+            }
+            return Err(AppError::Plugin(format!(
+                "pnpm install 在 profile 中失败（退出码 {:?}），已回滚 profile 配置，详情见日志：{}",
+                status.code(),
+                wiring_log_path(data_dir).display()
+            )));
+        }
+    }
+    if !failures.is_empty() {
         return Err(AppError::Plugin(format!(
-            "pnpm install 在 profile 中失败（退出码 {:?}），已回滚 profile 配置，详情见日志：{}",
-            status.code(),
-            wiring_log_path(data_dir).display()
+            "部分插件未能接入内核：{}。其余插件已正常接线；修复后点击「同步」重试",
+            failures.join("；")
         )));
     }
     Ok((specs.len(), changed))
@@ -2566,10 +2744,25 @@ pub fn uninstall(
     on_progress: &mut dyn FnMut(&str),
 ) -> Result<(), AppError> {
     store_item(data_dir, id).ok_or_else(|| AppError::Plugin("插件不在中央库中".into()))?;
+    // Delete the store dir FIRST: on Windows a file locked by the running
+    // kernel makes remove_dir_all fail, and failing here leaves every other
+    // piece of state untouched so the user can close the workbench and
+    // retry. Swallowing this error used to leave an orphaned store dir the
+    // shell could neither wire nor remove.
+    let store_path = store_plugin_dir(data_dir, id);
+    match fs::remove_dir_all(&store_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(AppError::Io(format!(
+                "无法删除插件目录 {}：{e}。文件可能正被运行中的内核占用，请关闭工作台后重试卸载",
+                store_path.display()
+            )));
+        }
+    }
     for version in kernel::list_installed(data_dir) {
         remove_materialized(data_dir, &version.version, id);
     }
-    let _ = fs::remove_dir_all(store_plugin_dir(data_dir, id));
     remove_item(data_dir, id)?;
     // 隔离记录随卸载一并清除：残留记录会在用户日后重装同名插件时把它挡
     // 在接线之外，形成"装了却不生效"的哑故障。
@@ -2646,27 +2839,12 @@ pub fn status(data_dir: &Path, settings: &settings::Settings) -> PluginStatus {
             }
             None => (None, false),
         };
-        let expected_spec = active.as_ref().map(|version| {
-            let prefix = if actual_mode.as_deref() == Some("copy") {
-                SPEC_FILE
-            } else {
-                SPEC_LINK
-            };
-            let rel = relative_path(
-                &profile_dir(data_dir, &settings.profile),
-                &kernel_plugin_dir(data_dir, version, &item.id),
-            );
-            format!("{prefix}{}", spec_path_string(&rel))
-        });
         let wired = profile_manifest
             .as_ref()
             .and_then(|m| m.get("dependencies"))
             .and_then(|d| d.get(&item.name))
             .and_then(|s| s.as_str())
-            .map(|spec| {
-                expected_spec.as_ref().map(|e| spec == e).unwrap_or(false)
-                    || (!is_managed_spec(spec) && spec.contains(WIRED_MARK))
-            })
+            .map(is_managed_spec)
             .unwrap_or(false);
         if item
             .latest_version
@@ -3194,11 +3372,13 @@ mod tests {
     fn computes_relative_paths() {
         let from = Path::new("/home/u/.dsh/profiles/web");
         let to = Path::new("/home/u/.dsh/desktop/kernels/0.1.1/plugins/x");
+        // Profile specs always go through spec_path_string, which
+        // normalizes the platform separator to forward slashes.
         assert_eq!(
-            relative_path(from, to).to_string_lossy(),
+            spec_path_string(&relative_path(from, to)),
             "../../desktop/kernels/0.1.1/plugins/x"
         );
-        assert_eq!(relative_path(from, from).to_string_lossy(), "");
+        assert_eq!(relative_path(from, from), PathBuf::new());
     }
 
     #[test]
@@ -3270,6 +3450,228 @@ mod tests {
         let meta = read_meta(&data_dir, version, id).expect("meta");
         assert_eq!(meta.mode, "copy");
         assert_eq!(meta.version, "1.0.0");
+    }
+
+    #[test]
+    fn copy_tree_reports_failing_path() {
+        let home = TestHome::new();
+        let missing = home.0.join("no-such-source");
+        let err = copy_tree(&missing, &home.0.join("out")).expect_err("missing source must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no-such-source"),
+            "error must name the failing path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn copy_tree_skips_dangling_symlink() {
+        let home = TestHome::new();
+        let source = home.0.join("src-tree");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("real.txt"), "hi").unwrap();
+        // A symlink whose target vanished: `fs::copy` on it fails with os
+        // error 2 on Windows, which used to abort the whole tree copy.
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(source.join("gone.txt"), source.join("link.txt"));
+        #[cfg(windows)]
+        let linked =
+            std::os::windows::fs::symlink_file(source.join("gone.txt"), source.join("link.txt"));
+        if linked.is_err() {
+            return; // no symlink privilege in this environment
+        }
+        let target = home.0.join("dst-tree");
+        copy_tree(&source, &target).expect("dangling link must not abort the copy");
+        assert_eq!(fs::read_to_string(target.join("real.txt")).unwrap(), "hi");
+        assert!(!target.join("link.txt").exists());
+    }
+
+    #[test]
+    fn copy_tree_aborts_on_link_cycle() {
+        let home = TestHome::new();
+        let source = home.0.join("cycle-tree");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("real.txt"), "hi").unwrap();
+        // A directory link pointing back at its own ancestor: the layout a
+        // circular pnpm dependency produces on macOS/Linux, where
+        // node_modules is all symlinks. The copy must fail with a clear
+        // error instead of recursing forever.
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&source, source.join("loop"));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&source, source.join("loop"));
+        if linked.is_err() {
+            return; // no symlink privilege in this environment
+        }
+        let err = copy_tree(&source, &home.0.join("dst-cycle")).expect_err("cycle must fail");
+        assert!(
+            err.to_string().contains("循环链接"),
+            "error explains the cycle, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reconcile_reaps_unmarked_staging_dirs() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+        write_fake_plugin(&store.join("live-plugin"), "1.0.0");
+        // Crash residue from before the `.dsh-id` stamp, plus legacy
+        // `.tmp-` names from an older shell: no marker, never user data.
+        fs::create_dir_all(store.join(format!("{TMP_PREFIX}1-2"))).unwrap();
+        fs::create_dir_all(store.join(".tmp-legacy-3")).unwrap();
+        reconcile_store(&data_dir);
+        assert!(!store.join(format!("{TMP_PREFIX}1-2")).exists());
+        assert!(!store.join(".tmp-legacy-3").exists());
+        assert!(store.join("live-plugin").is_dir());
+    }
+
+    #[test]
+    fn reconcile_keeps_live_plugin_named_like_staging() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let store = store_dir(&data_dir);
+        fs::create_dir_all(&store).unwrap();
+        // npm allows names with a staging prefix (`tmp-foo`): the final
+        // dir carries its own marker and must not be swept as its own
+        // staging residue.
+        let id = format!("{TMP_PREFIX}foo");
+        mark_staging(&store.join(&id), &id);
+        write_fake_plugin(&store.join(&id), "1.0.0");
+        reconcile_store(&data_dir);
+        assert!(store.join(&id).join("package.json").is_file());
+    }
+
+    #[test]
+    fn sweep_removes_only_owned_or_broken_orphans() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let version = "9.9.9";
+        let item = StoreItem {
+            id: "live".into(),
+            name: "live".into(),
+            origin: "npm".into(),
+            source: "live".into(),
+            installed_version: "1.0.0".into(),
+            latest_version: None,
+            mode: "copy".into(),
+            pinned: false,
+            installed_at: String::new(),
+            updated_at: String::new(),
+            repo_url: None,
+            description: None,
+        };
+        upsert_item(&data_dir, item).expect("store");
+        let store = load_store(&data_dir);
+        let plugins = kernel_plugins_dir(&data_dir, version);
+        fs::create_dir_all(plugins.join("live")).unwrap();
+        // Shell-owned orphan: a `.meta` record proves the shell put it here.
+        fs::create_dir_all(plugins.join("ghost")).unwrap();
+        write_meta(
+            &data_dir,
+            version,
+            "ghost",
+            &KernelMeta {
+                mode: "copy".into(),
+                version: "1.0.0".into(),
+                synced_at: "1".into(),
+            },
+        )
+        .expect("meta");
+        // Broken orphan: a symlink whose store target vanished.
+        #[cfg(unix)]
+        let linked =
+            std::os::unix::fs::symlink(plugins.join("missing-target"), plugins.join("dangler"));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(
+            plugins.join("missing-target"),
+            plugins.join("dangler"),
+        );
+        let has_link = linked.is_ok();
+        // Foreign entry: no meta, not a link — left for the user.
+        fs::create_dir_all(plugins.join("foreign")).unwrap();
+
+        sweep_kernel_orphans(&data_dir, version, &store);
+
+        assert!(plugins.join("live").exists());
+        assert!(!plugins.join("ghost").exists());
+        assert!(read_meta(&data_dir, version, "ghost").is_none());
+        if has_link {
+            assert!(!plugins.join("dangler").exists());
+        }
+        assert!(plugins.join("foreign").exists());
+    }
+
+    #[test]
+    fn wiring_survives_single_plugin_failure() {
+        let home = TestHome::new();
+        let data_dir = home.data_dir();
+        let version = "9.9.9";
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(data_dir.join("active.txt"), format!("{version}\n")).unwrap();
+        let mk_item = |id: &str, name: &str| StoreItem {
+            id: id.into(),
+            name: name.into(),
+            origin: "npm".into(),
+            source: name.into(),
+            installed_version: "1.0.0".into(),
+            latest_version: None,
+            // copy mode keeps the expected profile spec deterministic:
+            // link mode silently degrades to copy on hosts without
+            // symlink privilege, flipping the spec prefix.
+            mode: "copy".into(),
+            pinned: false,
+            installed_at: String::new(),
+            updated_at: String::new(),
+            repo_url: None,
+            description: None,
+        };
+        write_fake_plugin(&store_plugin_dir(&data_dir, "healthy"), "1.0.0");
+        upsert_item(&data_dir, mk_item("healthy", "healthy-plugin")).expect("healthy");
+        // Broken: registered in the store but its directory is gone.
+        upsert_item(&data_dir, mk_item("broken", "broken-plugin")).expect("broken");
+        // Profile already wired for the healthy plugin alone, so a
+        // successful run leaves the manifest untouched and never shells
+        // out to pnpm.
+        let profile = profile_dir(&data_dir, "web");
+        fs::create_dir_all(profile.join("node_modules")).unwrap();
+        let manifest = serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {
+                "healthy-plugin": "file:../../desktop/kernels/9.9.9/plugins/healthy"
+            },
+            "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"] } }
+        });
+        fs::write(
+            profile.join("package.json"),
+            serde_json::to_string_pretty(&manifest).unwrap() + "\n",
+        )
+        .unwrap();
+
+        let mut noop = |_: &str| {};
+        let err = ensure_wiring(
+            &data_dir,
+            &settings::Settings::default(),
+            Path::new("pnpm"),
+            &mut noop,
+        )
+        .expect_err("the broken plugin must surface as an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("broken-plugin"),
+            "error names the failed plugin: {msg}"
+        );
+        // The healthy plugin was still materialized and the manifest kept
+        // its wiring — one bad plugin no longer blocks everything else.
+        assert!(
+            kernel_plugin_dir(&data_dir, version, "healthy")
+                .join("package.json")
+                .is_file()
+        );
+        let on_disk = fs::read_to_string(profile.join("package.json")).unwrap();
+        assert!(on_disk.contains("healthy-plugin"));
     }
 
     #[test]
@@ -3371,6 +3773,113 @@ mod tests {
 
         let changed = wire_manifest(&mut root, &specs, "web").expect("wire again");
         assert!(!changed);
+    }
+
+    #[test]
+    fn is_managed_spec_matches_shell_layout_not_dir_name() {
+        // release 壳（desktop/）与 dev 壳（desktop-dev/）写出的 spec 都必须
+        // 识别为托管，否则 dev 卸载残留会被当成用户依赖保留，内核启动时
+        // 解析悬空 bundle 崩溃（regression：WIRED_MARK 只匹配 "desktop/kernels/"）。
+        assert!(is_managed_spec(
+            "link:../../desktop/kernels/1.0.0/plugins/x"
+        ));
+        assert!(is_managed_spec(
+            "link:../../desktop-dev/kernels/0.1.1-rc.2/plugins/x"
+        ));
+        // DSH_DESKTOP_DATA_DIR 覆盖为任意目录名时写出的 spec（common==0 时
+        // relative_path 产出绝对路径）。
+        assert!(is_managed_spec(
+            "file:C:/Users/u/.dsh/desktop/kernels/1/plugins/x"
+        ));
+        assert!(is_managed_spec(
+            "link:/Volumes/ext/dsh-shell/kernels/1/plugins/@scope__pkg"
+        ));
+        // 非托管：用户/CLI 依赖——版本号、任意 link/file 目标、路径里
+        // kernels/plugins 不构成尾部布局、空的 version/id 段。
+        assert!(!is_managed_spec("^1.0.0"));
+        assert!(!is_managed_spec("link:../packages/my-plugin"));
+        assert!(!is_managed_spec("file:../vendor/kernels/pkg"));
+        assert!(!is_managed_spec(
+            "link:../../desktop/plugins/1.0.0/kernels/x"
+        ));
+        assert!(!is_managed_spec("link:../../desktop/kernels//plugins/x"));
+        assert!(!is_managed_spec("link:../../desktop/kernels/1/plugins/"));
+    }
+
+    #[test]
+    fn wire_manifest_prunes_dev_shell_residue() {
+        // dev 壳卸载插件后 manifest 残留的 desktop-dev spec 必须被清退：
+        // 空 specs（安全模式/最后一个插件被卸载）下依赖与 bundle 层一起消失，
+        // 只留下模板层。用户/CLI 条目不受影响。
+        let mut root = serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {
+                "other": "1.0.0",
+                "dsh-synapse": "link:../../desktop-dev/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse",
+            },
+            "dsh": {
+                "profile": {
+                    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-synapse"],
+                },
+            },
+        });
+        let specs = BTreeMap::new();
+        let changed = wire_manifest(&mut root, &specs, "web").expect("wire");
+        assert!(changed);
+        let deps = root["dependencies"].as_object().expect("deps");
+        assert!(!deps.contains_key("dsh-synapse")); // dev 壳卸载残留清退
+        assert!(deps.contains_key("other")); // 用户/CLI 条目保留
+        let bundles: Vec<&str> = root["dsh"]["profile"]["bundles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b.as_str())
+            .collect();
+        assert_eq!(
+            bundles,
+            ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
+        );
+    }
+
+    #[test]
+    fn wire_manifest_rewrites_cross_shell_specs() {
+        // manifest 由 dev 壳接线，release 壳重新接线时 spec 重写为本壳的
+        // kernel plugins 目录。
+        let mut root = serde_json::json!({
+            "name": "dsh-profile-web",
+            "private": true,
+            "dependencies": {
+                "dsh-synapse": "link:../../desktop-dev/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse",
+            },
+            "dsh": {
+                "profile": {
+                    "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-synapse"],
+                },
+            },
+        });
+        let mut specs = BTreeMap::new();
+        specs.insert(
+            "dsh-synapse".to_string(),
+            (
+                "link:../../desktop/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse"
+                    .to_string(),
+                true,
+            ),
+        );
+        let changed = wire_manifest(&mut root, &specs, "web").expect("wire");
+        assert!(changed);
+        assert_eq!(
+            root["dependencies"]["dsh-synapse"].as_str().unwrap(),
+            "link:../../desktop/kernels/0.1.1-rc.2/plugins/github.com__liangmianya__dsh-synapse"
+        );
+        let bundles: Vec<&str> = root["dsh"]["profile"]["bundles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| b.as_str())
+            .collect();
+        assert!(bundles.contains(&"dsh-synapse"));
     }
 
     #[test]
