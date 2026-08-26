@@ -32,6 +32,13 @@ use crate::{guard, kernel, node, plugins, releases, settings, skills, updater};
 /// honest identity is also the consistent one.
 pub const OFFICIAL_CHAT_URL: &str = "https://chat.deepseek.com";
 
+// WKWebView stores cookies and localStorage under this identifier on macOS.
+// Keep the IDs stable across releases, and separate debug from release data.
+#[cfg(all(target_os = "macos", debug_assertions))]
+const OFFICIAL_CHAT_DATA_STORE_IDENTIFIER: [u8; 16] = *b"dsh-chat-dev-001";
+#[cfg(all(target_os = "macos", not(debug_assertions)))]
+const OFFICIAL_CHAT_DATA_STORE_IDENTIFIER: [u8; 16] = *b"dsh-chat-rel-001";
+
 /// Chromium feature switches passed to the `official-chat` webview.
 ///
 /// `additional_browser_args` **replaces** wry's built-in default set
@@ -753,11 +760,12 @@ pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Resul
 /// arguments only work on their own user-data folder (WebView2 requires
 /// identical environment options across one folder), so the builder pins
 /// `.data_directory` to `<data_dir>/webview-official-chat` instead of the
-/// default folder the panel and harness windows share. The folder doubles
-/// as this window's persistent profile: cookies and storage survive shell
-/// restarts, so the DeepSeek login behaves like a normal browser instead
-/// of asking for sign-in on every open. Isolation from the panel and
-/// harness windows comes from the folder itself, not private mode.
+/// default folder the panel and harness windows share on Windows. WKWebView
+/// on macOS does not use `data_directory`; the builder supplies a stable
+/// `data_store_identifier` there instead. Both stores are persistent, so
+/// cookies, localStorage, and IndexedDB survive shell restarts and the
+/// DeepSeek login is reused on every open. Debug and release use separate
+/// stores to preserve the shell's existing data-directory isolation.
 ///
 /// Three `initialization_script` calls run in the order added on every
 /// new document, so the chain is load-bearing:
@@ -801,7 +809,7 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
         .name("dsh-open-official-chat".into())
         .spawn(move || {
             let _ = fs::create_dir_all(&profile_dir);
-            let result =
+            let builder =
                 WebviewWindowBuilder::new(&handle, "official-chat", WebviewUrl::External(url))
                     .title("DeepSeek 官方对话")
                     .inner_size(1280.0, 840.0)
@@ -809,8 +817,10 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
                     .additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)
                     .initialization_script(include_str!("pullstring-launcher.js"))
                     .initialization_script(include_str!("titlebar-pulse.js"))
-                    .initialization_script(include_str!("chat-fingerprint.js"))
-                    .build();
+                    .initialization_script(include_str!("chat-fingerprint.js"));
+            #[cfg(target_os = "macos")]
+            let builder = builder.data_store_identifier(OFFICIAL_CHAT_DATA_STORE_IDENTIFIER);
+            let result = builder.build();
             if let Err(ref e) = result {
                 eprintln!("dsh-desktop: failed to open official chat window: {e}");
             }
