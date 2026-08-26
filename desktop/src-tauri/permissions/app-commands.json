@@ -31,6 +31,8 @@
           "open_log_window",
           "open_official_chat",
           "close_official_chat",
+          "official_chat_tabs",
+          "switch_official_chat_tab",
           "focus_main_shell",
           "plugin_status",
           "plugin_install",
@@ -49,6 +51,13 @@
           "skill_check_updates",
           "confirm_close_shell"
         ]
+      }
+    },
+    {
+      "identifier": "allow-official-chat-tabs",
+      "description": "Tab-control commands for the official-chat window's local strip webview (label \"official-chat-strip\", the index.html?chatstrip=1 SPA route). The strip renders the tab bar and calls these to read the fixed tab list and switch the active content webview. Granted only to the local strip webview — the remote content webviews (chat.deepseek.com / bigmodel.cn) never get them because chat-fingerprint.js deletes window.__TAURI__ there, and the capability has no remote matcher.",
+      "commands": {
+        "allow": ["official_chat_tabs", "switch_official_chat_tab"]
       }
     },
     {

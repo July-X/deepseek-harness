@@ -9,7 +9,12 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `unstable` exposes `WebviewBuilder` / `WindowBuilder` (bare window) /
+# `Window::add_child` — the multi-webview-per-window primitives the tabbed
+# official-chat window needs (one chrome-strip webview + N content webviews
+# in a single window). Pinned to tauri 2.11.x, so the unstable-API churn
+# risk is bounded to a tauri bump.
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }

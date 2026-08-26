@@ -115,6 +115,8 @@ pub fn run() {
             commands::open_log_window,
             commands::open_official_chat,
             commands::close_official_chat,
+            commands::official_chat_tabs,
+            commands::switch_official_chat_tab,
             commands::focus_main_shell,
             commands::plugin_status,
             commands::plugin_install,
@@ -169,7 +171,7 @@ pub fn run() {
             // Only intercept the management window's X button; the harness
             // workbench webview (label "harness") is allowed to close
             // without confirmation since it has no kernel handle of its own.
-            let official_chat_open = handle.get_webview_window("official-chat").is_some();
+            let official_chat_open = handle.get_window("official-chat").is_some();
             if label == "main" && (kernel_running(handle) || official_chat_open) {
                 // Kernel running or official chat open: ask the user before
                 // tearing the shell down — a confirmed quit closes both.
@@ -204,7 +206,7 @@ pub fn run() {
             // as the WindowEvent handler above: official-chat is a
             // transient panel-driven window and closing the panel implies
             // closing it.
-            if let Some(oc) = handle.get_webview_window("official-chat") {
+            if let Some(oc) = handle.get_window("official-chat") {
                 let _ = oc.destroy();
             }
             if let Some(state) = handle.try_state::<AppState>() {

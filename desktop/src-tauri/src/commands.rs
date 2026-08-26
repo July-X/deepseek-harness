@@ -12,8 +12,8 @@ use std::sync::{mpsc, Mutex};
 
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State};
-use tauri::{WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, State};
+use tauri::{WebviewBuilder, WebviewUrl, WebviewWindowBuilder, WindowBuilder, WindowEvent};
 use url::Url;
 
 use crate::error::AppError;
@@ -55,6 +55,30 @@ const OFFICIAL_CHAT_DATA_STORE_IDENTIFIER: [u8; 16] = *b"dsh-chat-rel-001";
 /// rule is why [`open_official_chat`] pairs this constant with a dedicated
 /// user-data directory.
 pub const OFFICIAL_CHAT_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AutomationControlled,TranslateUI,InterestFeedContentSuggestions --disable-blink-features=AutomationControlled";
+
+/// Second official-chat tab: the BigModel (智谱) trial center.
+pub const OFFICIAL_CHAT_BIGMODEL_URL: &str = "https://bigmodel.cn/trialcenter/modeltrial/text";
+
+/// The fixed tabs rendered in the official-chat window's tab strip, in
+/// display order. The first entry is the default active tab on open. Add a
+/// row here to add a tab — the strip webview discovers the list at runtime
+/// via [`official_chat_tabs`] and content webviews are created in lockstep,
+/// so no other site is needed for a new tab.
+pub const OFFICIAL_CHAT_TABS: &[(&str, &str)] = &[
+    ("DeepSeek", OFFICIAL_CHAT_URL),
+    ("智谱 BigModel", OFFICIAL_CHAT_BIGMODEL_URL),
+];
+
+/// Bare-window label. A `Window` (not a `WebviewWindow`) hosts the strip
+/// plus one child `Webview` per tab; closing the window tears down the lot.
+const OFFICIAL_CHAT_WINDOW_LABEL: &str = "official-chat";
+/// Local SPA webview that renders the tab bar (`index.html?chatstrip=1`).
+/// It keeps `window.__TAURI__` — `chat-fingerprint.js` is NOT injected here —
+/// so it can invoke [`official_chat_tabs`] / [`switch_official_chat_tab`].
+const OFFICIAL_CHAT_STRIP_LABEL: &str = "official-chat-strip";
+/// Logical height of the pinned tab strip. Content webviews fill the window
+/// below this offset and are re-laid-out on every window resize.
+const OFFICIAL_CHAT_STRIP_HEIGHT: f64 = 38.0;
 
 /// Shared shell state installed as a Tauri managed state.
 pub struct AppState {
@@ -116,7 +140,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         let quarantine_doc = quarantine::load(&data_dir);
         let state = app.state::<AppState>();
         let node_info = cached_node(&state, &settings);
-        let official_chat_open = app.get_webview_window("official-chat").is_some();
+        let official_chat_open = app.get_window(OFFICIAL_CHAT_WINDOW_LABEL).is_some();
         StatusView {
             shell_version: app.package_info().version.to_string(),
             dev_build: cfg!(debug_assertions),
@@ -733,73 +757,52 @@ pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Resul
     window.set_focus().map_err(|e| e.to_string())
 }
 
-/// Open the DeepSeek official chat in a dedicated WebviewWindow.
+/// Open the DeepSeek official chat in a tabbed window.
 ///
-/// Same threading pattern as `open_harness`: the webview must be built on a
-/// fresh OS thread to avoid the documented Windows deadlock from
-/// `WebviewWindowBuilder::new` inside a synchronous command on the Tauri
-/// main thread, and the new thread is named so it shows up in stack
-/// samples when something goes wrong.
+/// One bare `tauri::Window` (label [`OFFICIAL_CHAT_WINDOW_LABEL`]) hosts a
+/// pinned tab-strip webview ([`OFFICIAL_CHAT_STRIP_LABEL`], the local SPA
+/// route `index.html?chatstrip=1`) plus one content webview per entry in
+/// [`OFFICIAL_CHAT_TABS`]. Only the active content webview is shown; the
+/// rest are hidden, so each site keeps its own page state across tab
+/// switches. [`relayout_official_chat`] keeps the strip pinned to the top
+/// and the content webviews filling the area below on every resize.
 ///
-/// The URL is fixed to [`OFFICIAL_CHAT_URL`]; the lamp / pulse script
-/// decides per-call colors and offsets from the page's `hostname`, so the
-/// same two injected files serve both the green workbench and the blue
-/// official chat.
+/// Built on a fresh OS thread (same Windows-deadlock reasoning as
+/// [`open_harness`]); the `Result<(), String>` ships back over an `mpsc`
+/// channel so the `async` command only resolves after the window and every
+/// child webview is registered. `Window::add_child` dispatches webview
+/// creation to the main thread internally, so it must run off the Tauri
+/// command thread — the dedicated builder thread satisfies that.
+///
+/// Login persistence is unchanged from the single-window era: every content
+/// webview shares the `<data_dir>/webview-official-chat` user-data folder
+/// (Windows) / [`OFFICIAL_CHAT_DATA_STORE_IDENTIFIER`] (macOS), so cookies,
+/// localStorage, and IndexedDB survive shell restarts. Storage is
+/// origin-scoped by the browser, so the DeepSeek and BigModel tabs do not
+/// collide even though they share one store. WebView2 also requires
+/// identical environment options per user-data folder; every content
+/// webview passes the same [`OFFICIAL_CHAT_BROWSER_ARGS`], so the
+/// shared-folder constraint holds. The strip webview is local SPA content,
+/// so it is exempt from `chat-fingerprint.js` and keeps
+/// `window.__TAURI__` for invoking [`official_chat_tabs`] /
+/// [`switch_official_chat_tab`].
 ///
 /// The window is **not** `closable(false)`: a webview to a third-party
 /// origin has no kernel session to protect, so the OS chrome close button
 /// should keep working. Repeat clicks reuse the existing window via
-/// `app.get_webview_window("official-chat")` and re-focus it.
-///
-/// No user-agent override — see the note above [`OFFICIAL_CHAT_URL`]: an
-/// honest desktop-Edge identity keeps every layer consistent.
-/// `.additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)` disables
-/// the engine-level automation switches (`navigator.webdriver`) and keeps
-/// SmartScreen / Edge-only UI off; the constant restates wry's default
-/// disable-list because passing browser args replaces it. Custom browser
-/// arguments only work on their own user-data folder (WebView2 requires
-/// identical environment options across one folder), so the builder pins
-/// `.data_directory` to `<data_dir>/webview-official-chat` instead of the
-/// default folder the panel and harness windows share on Windows. WKWebView
-/// on macOS does not use `data_directory`; the builder supplies a stable
-/// `data_store_identifier` there instead. Both stores are persistent, so
-/// cookies, localStorage, and IndexedDB survive shell restarts and the
-/// DeepSeek login is reused on every open. Debug and release use separate
-/// stores to preserve the shell's existing data-directory isolation.
-///
-/// Three `initialization_script` calls run in the order added on every
-/// new document, so the chain is load-bearing:
-///
-/// 1. `pullstring-launcher.js` — captures a reference to the real
-///    `window.__TAURI__` at module top into a closure-scoped variable,
-///    so the lamp still has a working IPC bridge after step 3 deletes
-///    the global.
-/// 2. `titlebar-pulse.js` — appends the chrome-row sweep stylesheet.
-/// 3. `chat-fingerprint.js` — the last script to run: pins
-///    `navigator.webdriver` to `false` (the value a normal non-automated
-///    browser reports) and deletes the `__TAURI__` / `__TAURI_INTERNALS__`
-///    / `__TAURI_METADATA__` / `__TAURI_IPC__` globals outright — a
-///    normal browser has no such globals, so page probes must see none.
-///
-/// The command is `async` so the caller can observe the real build result
-/// rather than just "a thread was started". The builder runs on a fresh OS
-/// thread (same Windows-deadlock reasoning as `open_harness`) and ships
-/// the `Result<WebviewWindow, tauri::Error>` back over a `std::sync::mpsc`
-/// channel; a `spawn_blocking` await picks it up so the Tauri command only
-/// resolves `Ok(())` after the window is actually registered with the app.
+/// `app.get_window(OFFICIAL_CHAT_WINDOW_LABEL)` and re-focus it.
 #[tauri::command]
 pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
-    if let Some(existing) = app.get_webview_window("official-chat") {
+    if let Some(existing) = app.get_window(OFFICIAL_CHAT_WINDOW_LABEL) {
         let _ = existing.set_focus();
         return Ok(());
     }
-    let url = Url::parse(OFFICIAL_CHAT_URL).map_err(|e| e.to_string())?;
     let handle = app.clone();
     // WebView2 requires every environment on a user-data folder to share
     // identical options — additional browser arguments included. The panel
     // and harness windows already run a default-options environment on the
-    // default folder, so this window needs its own folder or environment
-    // creation fails and the window never appears.
+    // default folder, so the official-chat content webviews need their own
+    // folder or environment creation fails and the window never appears.
     let profile_dir = {
         let state = app.state::<AppState>();
         state.data_dir.join("webview-official-chat")
@@ -808,19 +811,84 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
     std::thread::Builder::new()
         .name("dsh-open-official-chat".into())
         .spawn(move || {
-            let _ = fs::create_dir_all(&profile_dir);
-            let builder =
-                WebviewWindowBuilder::new(&handle, "official-chat", WebviewUrl::External(url))
+            let result: Result<(), String> = (|| {
+                let window = WindowBuilder::new(&handle, OFFICIAL_CHAT_WINDOW_LABEL)
                     .title("DeepSeek 官方对话")
                     .inner_size(1280.0, 840.0)
-                    .data_directory(profile_dir)
-                    .additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)
-                    .initialization_script(include_str!("pullstring-launcher.js"))
-                    .initialization_script(include_str!("titlebar-pulse.js"))
-                    .initialization_script(include_str!("chat-fingerprint.js"));
-            #[cfg(target_os = "macos")]
-            let builder = builder.data_store_identifier(OFFICIAL_CHAT_DATA_STORE_IDENTIFIER);
-            let result = builder.build();
+                    .resizable(true)
+                    .build()
+                    .map_err(|e| format!("无法创建官方对话窗口：{e}"))?;
+                let _ = fs::create_dir_all(&profile_dir);
+                let scale = window.scale_factor().unwrap_or(1.0);
+                // inner_size() can read 0 before the window is shown on some
+                // backends; fall back to the requested 1280x840 logical so the
+                // content webviews get a sane initial size before the first
+                // Resized event relayouts with the real geometry.
+                let phys = window.inner_size().unwrap_or_default();
+                let mut w = phys.width as f64 / scale;
+                let mut h = phys.height as f64 / scale;
+                if w <= 0.0 || h <= 0.0 {
+                    w = 1280.0;
+                    h = 840.0;
+                }
+                let content_h = (h - OFFICIAL_CHAT_STRIP_HEIGHT).max(0.0);
+
+                // Tab strip: local SPA route renders the tab bar and keeps
+                // window.__TAURI__ (chat-fingerprint.js is NOT injected
+                // here) so it can invoke the tab commands.
+                let strip_builder = WebviewBuilder::new(
+                    OFFICIAL_CHAT_STRIP_LABEL,
+                    WebviewUrl::App("index.html?chatstrip=1".into()),
+                );
+                window
+                    .add_child(
+                        strip_builder,
+                        LogicalPosition::new(0.0, 0.0),
+                        LogicalSize::new(w, OFFICIAL_CHAT_STRIP_HEIGHT),
+                    )
+                    .map_err(|e| format!("无法创建官方对话页签栏：{e}"))?;
+
+                // One content webview per tab. Only the first is visible on
+                // open; switch_official_chat_tab toggles the rest.
+                for (i, tab) in OFFICIAL_CHAT_TABS.iter().enumerate() {
+                    let label = format!("official-chat-tab-{i}");
+                    let url = Url::parse(tab.1).map_err(|e| format!("非法页签地址：{e}"))?;
+                    let mut builder = WebviewBuilder::new(label, WebviewUrl::External(url))
+                        .data_directory(profile_dir.clone())
+                        .additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)
+                        .initialization_script(include_str!("pullstring-launcher.js"))
+                        .initialization_script(include_str!("titlebar-pulse.js"))
+                        .initialization_script(include_str!("chat-fingerprint.js"));
+                    #[cfg(target_os = "macos")]
+                    {
+                        builder =
+                            builder.data_store_identifier(OFFICIAL_CHAT_DATA_STORE_IDENTIFIER);
+                    }
+                    let wv = window
+                        .add_child(
+                            builder,
+                            LogicalPosition::new(0.0, OFFICIAL_CHAT_STRIP_HEIGHT),
+                            LogicalSize::new(w, content_h),
+                        )
+                        .map_err(|e| format!("无法创建官方对话页签：{e}"))?;
+                    if i != 0 {
+                        let _ = wv.hide();
+                    }
+                }
+
+                // Keep the strip pinned to the top and content filling
+                // below on every resize and scale-factor change.
+                let app_for_layout = handle.clone();
+                window.on_window_event(move |event| {
+                    if matches!(
+                        event,
+                        WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+                    ) {
+                        relayout_official_chat(&app_for_layout);
+                    }
+                });
+                Ok(())
+            })();
             if let Err(ref e) = result {
                 eprintln!("dsh-desktop: failed to open official chat window: {e}");
             }
@@ -831,21 +899,102 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     match built {
-        Some(Ok(_)) => Ok(()),
-        Some(Err(e)) => Err(format!("无法打开官方对话窗口：{e}")),
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(e),
         None => Err("官方对话窗口创建线程已结束，未返回结果".to_string()),
     }
 }
 
-/// Close the DeepSeek official chat webview if it is currently open.
+/// Re-position the tab strip and every content webview to the window's
+/// current inner size. Called on window create and on every `Resized` /
+/// `ScaleFactorChanged` event so the strip stays pinned to the top and the
+/// content webviews fill the area below it. All units are logical; the
+/// strip keeps a fixed height. Visibility is left untouched so an active
+/// tab stays active across a resize.
+fn relayout_official_chat(app: &AppHandle) {
+    let Some(window) = app.get_window(OFFICIAL_CHAT_WINDOW_LABEL) else {
+        return;
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let Some(phys) = window.inner_size().ok() else {
+        return;
+    };
+    let w = phys.width as f64 / scale;
+    let h = phys.height as f64 / scale;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let content_h = (h - OFFICIAL_CHAT_STRIP_HEIGHT).max(0.0);
+    if let Some(strip) = app.get_webview(OFFICIAL_CHAT_STRIP_LABEL) {
+        let _ = strip.set_position(LogicalPosition::new(0.0, 0.0));
+        let _ = strip.set_size(LogicalSize::new(w, OFFICIAL_CHAT_STRIP_HEIGHT));
+    }
+    for (i, _) in OFFICIAL_CHAT_TABS.iter().enumerate() {
+        if let Some(wv) = app.get_webview(&format!("official-chat-tab-{i}")) {
+            let _ = wv.set_position(LogicalPosition::new(0.0, OFFICIAL_CHAT_STRIP_HEIGHT));
+            let _ = wv.set_size(LogicalSize::new(w, content_h));
+        }
+    }
+}
+
+/// One tab in the official-chat tab strip, as the strip webview renders it.
+#[derive(Serialize)]
+pub struct OfficialChatTab {
+    pub index: usize,
+    pub title: String,
+}
+
+/// Return the fixed tab list for the strip webview to render. Read-only:
+/// the strip calls this on mount, then [`switch_official_chat_tab`] on
+/// click. Defined as a command (not a compile-time constant the SPA would
+/// have to duplicate) so the tab list lives in one place.
+#[tauri::command]
+pub fn official_chat_tabs() -> Vec<OfficialChatTab> {
+    OFFICIAL_CHAT_TABS
+        .iter()
+        .enumerate()
+        .map(|(index, (title, _))| OfficialChatTab {
+            index,
+            title: (*title).to_string(),
+        })
+        .collect()
+}
+
+/// Switch the active tab in the official-chat window.
 ///
-/// Returns an error when the window was never opened (or was already torn
-/// down by the OS chrome close button) so the panel's toggle can surface a
-/// sensible message instead of silently no-op'ing. The button label flips
-/// back to "打开官方对话" on the next status poll once the window is gone.
+/// Hides every content webview except the one at `index`, then shows and
+/// focuses it. The strip webview tracks its own active tab locally (it
+/// issued the click), so no back-event is needed for the common path; the
+/// default active tab on open is `0`, which the strip assumes on mount.
+#[tauri::command]
+pub fn switch_official_chat_tab(app: AppHandle, index: usize) -> Result<(), String> {
+    if index >= OFFICIAL_CHAT_TABS.len() {
+        return Err(format!("官方对话页签不存在：{index}"));
+    }
+    for (i, _) in OFFICIAL_CHAT_TABS.iter().enumerate() {
+        if let Some(wv) = app.get_webview(&format!("official-chat-tab-{i}")) {
+            if i == index {
+                let _ = wv.show();
+                let _ = wv.set_focus();
+            } else {
+                let _ = wv.hide();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Close the DeepSeek official chat window (and all its tab webviews) if it
+/// is currently open. Returns an error when the window was never opened (or
+/// was already torn down by the OS chrome close button) so the panel's
+/// toggle can surface a sensible message instead of silently no-op'ing.
+/// Destroying the bare window tears down its child webviews; the persistent
+/// data store survives, so the next open reuses the saved login. The button
+/// label flips back to "打开官方对话" on the next status poll once the
+/// window is gone.
 #[tauri::command]
 pub fn close_official_chat(app: AppHandle) -> Result<(), String> {
-    app.get_webview_window("official-chat")
+    app.get_window(OFFICIAL_CHAT_WINDOW_LABEL)
         .ok_or("官方对话窗口未打开".to_string())?
         .destroy()
         .map_err(|e| e.to_string())

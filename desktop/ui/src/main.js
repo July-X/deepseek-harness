@@ -10,7 +10,12 @@ import 'element-plus/theme-chalk/dark/css-vars.css';
 import './theme.css';
 import App from './App.vue';
 import LogViewerWindow from './LogViewerWindow.vue';
+import OfficialChatTabs from './components/OfficialChatTabs.vue';
 
-const isLogViewer = new URLSearchParams(location.search).has('log');
+const params = new URLSearchParams(location.search);
+const isLogViewer = params.has('log');
+const isChatStrip = params.has('chatstrip');
 
-createApp(isLogViewer ? LogViewerWindow : App).use(ElementPlus, { locale: zhCn }).mount('#app');
+createApp(isLogViewer ? LogViewerWindow : isChatStrip ? OfficialChatTabs : App)
+  .use(ElementPlus, { locale: zhCn })
+  .mount('#app');

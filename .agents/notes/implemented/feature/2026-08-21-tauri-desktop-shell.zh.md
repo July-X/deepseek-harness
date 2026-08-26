@@ -36,9 +36,9 @@ DeepSeek Harness 目前的消费方式是通过浏览器 UI 使用：`npx @deeps
 
 ## 后果
 
-外壳承载三个 webview：本地静态管理面板（启动时唯一存在，是管理内核的唯一入口），以及由面板上对应按钮按需拉起的两个 `WebviewWindow`——`harness` 承载 `dsh web`，`official-chat` 承载 `https://chat.deepseek.com`。`official-chat` 窗口不持有内核会话，OS chrome 关闭按钮保持可用；`harness` 窗口设 `closable(false)` 防止误关丢会话，面板靠 `get_webview_window` + `set_focus` 按需重开。内核数据（会话、设置、profile）留在 dsh 自己的 `~/.dsh` home；只有外壳元数据（已装版本、活动指针、设置、日志）位于应用数据目录。GitHub REST 回退到 Atom 只在更新菜单里以警告形式可见。安装包未签名，因此 Windows SmartScreen 与 macOS Gatekeeper 会告警，直到加入代码签名。面板每次刷新状态都通过探测端口自动恢复陈旧状态。
+外壳承载三个 webview：本地静态管理面板（启动时唯一存在，是管理内核的唯一入口），以及由面板上对应按钮按需拉起的两个窗口——`harness`（`WebviewWindow`）承载 `dsh web`，`official-chat`（裸 `Window`，挂一个页签栏子 webview 加 `OFFICIAL_CHAT_TABS` 每条一个内容 webview：DeepSeek 对话与智谱 BigModel 试用中心）。`official-chat` 窗口不持有内核会话，OS chrome 关闭按钮保持可用；`harness` 窗口设 `closable(false)` 防止误关丢会话，面板靠 `get_window` / `get_webview_window` + `set_focus` 按需重开。内核数据（会话、设置、profile）留在 dsh 自己的 `~/.dsh` home；只有外壳元数据（已装版本、活动指针、设置、日志）位于应用数据目录。GitHub REST 回退到 Atom 只在更新菜单里以警告形式可见。安装包未签名，因此 Windows SmartScreen 与 macOS Gatekeeper 会告警，直到加入代码签名。面板每次刷新状态都通过探测端口自动恢复陈旧状态。
 
-管理面板关闭时，`official-chat` 窗口在每次真实退出中级联关闭：它是面板驱动的瞬态窗口，不持有自己的生命周期，因此 `RunEvent::Exit` 处理路径会通过 `get_webview_window("official-chat").destroy()` 销毁它。`WindowEvent::CloseRequested` 拦截只挂起关闭动作并在内核运行或对话窗口打开时请求确认——退出前不销毁任何窗口，取消提示即完整恢复原状。`harness` 工作台窗口刻意不参与级联——它的生命周期由 `stop_kernel` 绑定到内核子进程，目前没有把它与管理面板绑死的文档化信号，所以关闭面板（暂）不关闭工作台。
+管理面板关闭时，`official-chat` 窗口（及其页签子 webview）在每次真实退出中级联关闭：它是面板驱动的瞬态窗口，不持有自己的生命周期，因此 `RunEvent::Exit` 处理路径会通过 `get_window("official-chat").destroy()` 销毁它；销毁裸窗口连带销毁子 webview，持久化数据存储仍保留。`WindowEvent::CloseRequested` 拦截只挂起关闭动作并在内核运行或对话窗口打开时请求确认——退出前不销毁任何窗口，取消提示即完整恢复原状。`harness` 工作台窗口刻意不参与级联——它的生命周期由 `stop_kernel` 绑定到内核子进程，目前没有把它与管理面板绑死的文档化信号，所以关闭面板（暂）不关闭工作台。
 
 ## 测试
 

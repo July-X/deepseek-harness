@@ -1,9 +1,9 @@
 {
   "identifier": "official-chat-remote",
-  "description": "The DeepSeek official chat is a remote origin (https://chat.deepseek.com), so Tauri's ACL denies its invokes by default. Grant only the pull-string launcher's command so the injected lamp on chat.deepseek.com can raise the management panel over the user's cursor. The URL is intentionally exact (not a `*.deepseek.com` wildcard) so only the chat subdomain — not the marketing site or any future sub-app — can drive IPC.",
+  "description": "The official-chat content webviews are remote origins (DeepSeek chat and the BigModel trial center), so Tauri's ACL denies their invokes by default. Grant only the pull-string launcher's command so the injected lamp on either tab can raise the management panel over the user's cursor. The URLs are intentionally exact (not wildcards) so only those two paths — not the marketing sites or any future sub-app — can drive IPC.",
   "windows": ["official-chat"],
   "remote": {
-    "urls": ["https://chat.deepseek.com/*"]
+    "urls": ["https://chat.deepseek.com/*", "https://bigmodel.cn/trialcenter/modeltrial/text/*"]
   },
   "permissions": ["allow-focus-main-shell"]
 }
