@@ -979,36 +979,47 @@ if (window.__TAURI__ && window.__TAURI__.event) {
 }
 
 // Full-quit confirmation: the Rust side intercepts the main window's X
-// button when the kernel is still running, calls `prevent_close()`, and
-// pings this listener. We surface the same in-page modal used for the
+// button when the kernel is still running OR the official-chat window is
+// open, calls `prevent_close()`, and pings this listener with the states
+// that triggered it. We surface the same in-page modal used for the
 // 「停止内核」 action so the user is never asked to confirm two different
 // exit flows in two different visual styles. The pending flag suppresses
 // re-entry if the user mashes the X while the dialog is up.
 let quitConfirmPending = false;
 if (window.__TAURI__ && window.__TAURI__.event) {
-  window.__TAURI__.event.listen('request-quit-confirm', () => {
+  window.__TAURI__.event.listen('request-quit-confirm', (e) => {
     if (quitConfirmPending) {
       return;
     }
+    const payload = e && e.payload ? e.payload : {};
+    const kernelRunning = !!payload.kernel_running;
+    const chatOpen = !!payload.official_chat_open;
+    let detail;
+    if (kernelRunning && chatOpen) {
+      detail = '工作台与官方对话窗口仍在运行。关闭主壳会一并关闭它们；继续吗？';
+    } else if (chatOpen) {
+      detail = '官方对话窗口仍打开。关闭主壳会一并关闭它（登录状态已保留）；继续吗？';
+    } else {
+      detail = '工作台仍在运行。关闭主壳前需要先关闭工作台；继续吗？';
+    }
     quitConfirmPending = true;
-    confirmDialog(
-      '完全退出？',
-      '工作台仍在运行。关闭主壳前需要先关闭工作台；继续吗？',
-      '关闭并退出'
-    )
+    confirmDialog('完全退出？', detail, '关闭并退出')
       .then((ok) => {
         if (!ok) {
           return;
         }
         // Stop the kernel first so the port frees up before the shell
         // tears down — this matches what `stop_kernel` does on the
-        // standalone 「关闭工作台」 path. The window destroy below
-        // intentionally has no fallback: if it fails the kernel is
-        // already gone and the user can quit again or close manually.
-        return invoke('stop_kernel')
-          .catch((e) => toast('关闭工作台失败：' + e, 5000))
+        // standalone 「关闭工作台」 path; skipped when the kernel was not
+        // running. The window destroy below intentionally has no
+        // fallback: if it fails the kernel is already gone and the user
+        // can quit again or close manually.
+        const stop = kernelRunning
+          ? invoke('stop_kernel').catch((err) => toast('关闭工作台失败：' + err, 5000))
+          : Promise.resolve();
+        return stop
           .then(() => invoke('confirm_close_shell'))
-          .catch((e) => toast('退出失败：' + e + '（请手动关闭窗口）', 6000));
+          .catch((err) => toast('退出失败：' + err + '（请手动关闭窗口）', 6000));
       })
       .finally(() => {
         quitConfirmPending = false;

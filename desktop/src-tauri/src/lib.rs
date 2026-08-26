@@ -158,39 +158,37 @@ pub fn run() {
             // Only intercept the management window's X button; the harness
             // workbench webview (label "harness") is allowed to close
             // without confirmation since it has no kernel handle of its own.
-            if label == "main" && kernel_running(handle) {
-                // Kernel running: ask the user before tearing the shell down.
+            let official_chat_open = handle.get_webview_window("official-chat").is_some();
+            if label == "main" && (kernel_running(handle) || official_chat_open) {
+                // Kernel running or official chat open: ask the user before
+                // tearing the shell down — a confirmed quit closes both.
                 // prevent_close() parks the close; the UI either confirms
-                // (calls stop_kernel + confirm_close_shell) or cancels.
+                // (stops the kernel when running, then calls
+                // confirm_close_shell) or cancels, leaving every window
+                // exactly as it was. Nothing is destroyed here so a cancel
+                // cannot take the official-chat window down with it.
                 api.prevent_close();
                 if let Some(window) = handle.get_webview_window("main") {
-                    let _ = window.emit("request-quit-confirm", ());
-                }
-                // Cascade-close the official-chat panel-driven window: it does
-                // not own its own lifecycle, so closing the management panel
-                // implies closing it. Mirrored in the RunEvent::Exit branch
-                // below for the path where the panel closes without the
-                // kernel-running prompt intercepting (no kernel running, or
-                // close fired via OS shutdown / quit()). The harness workbench
-                // window is intentionally NOT cascaded here — its lifecycle is
-                // tied to the kernel child via stop_kernel, and the user may
-                // want the harness to outlive the management panel.
-                if let Some(oc) = handle.get_webview_window("official-chat") {
-                    let _ = oc.destroy();
+                    let _ = window.emit(
+                        "request-quit-confirm",
+                        serde_json::json!({
+                            "kernel_running": kernel_running(handle),
+                            "official_chat_open": official_chat_open,
+                        }),
+                    );
                 }
             }
-            // No kernel running, or not the main window: let the close
-            // proceed. The Exit branch below still reaps any pid-file
-            // leftover from an earlier shell crash.
+            // Not the main window, or neither the kernel nor the official
+            // chat needs a warning: let the close proceed. The Exit branch
+            // below cascade-closes the official-chat webview on every real
+            // exit and reaps any pid-file leftover from an earlier crash.
         }
         if let tauri::RunEvent::Exit = event {
-            // Cascade-close the official-chat panel-driven window before the
-            // process exits. This is the fallback path for cases where the
-            // management panel closed without going through the
-            // kernel-running prompt (no kernel running, OS shutdown, or quit()
-            // fired from the UI). Same rationale as the WindowEvent handler
-            // above: official-chat is a transient panel-driven window and
-            // closing the panel implies closing it.
+            // Cascade-close the official-chat panel-driven window on every
+            // real exit — the confirmed-quit path from the prompt, OS
+            // shutdown, or a close that needed no warning. Same rationale as
+            // the WindowEvent handler above: official-chat is a transient
+            // panel-driven window and closing the panel implies closing it.
             if let Some(oc) = handle.get_webview_window("official-chat") {
                 let _ = oc.destroy();
             }

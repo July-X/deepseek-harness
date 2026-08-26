@@ -708,34 +708,25 @@ pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Resul
 /// arguments only work on their own user-data folder (WebView2 requires
 /// identical environment options across one folder), so the builder pins
 /// `.data_directory` to `<data_dir>/webview-official-chat` instead of the
-/// default folder the panel and harness windows share.
-/// `.incognito(true)`
-/// keeps each chat session clean — no shared
-/// cookies or storage with other official-chat windows — so the same
-/// identity is not accidentally reused across reloads.
+/// default folder the panel and harness windows share. The folder doubles
+/// as this window's persistent profile: cookies and storage survive shell
+/// restarts, so the DeepSeek login behaves like a normal browser instead
+/// of asking for sign-in on every open. Isolation from the panel and
+/// harness windows comes from the folder itself, not private mode.
 ///
-/// Three `initialization_script` calls harden the browser fingerprint
-/// before any page script executes. They run in the order added on every
+/// Three `initialization_script` calls run in the order added on every
 /// new document, so the chain is load-bearing:
 ///
 /// 1. `pullstring-launcher.js` — captures a reference to the real
 ///    `window.__TAURI__` at module top into a closure-scoped variable,
-///    so the lamp still has a working IPC bridge after step 3 replaces
+///    so the lamp still has a working IPC bridge after step 3 deletes
 ///    the global.
 /// 2. `titlebar-pulse.js` — appends the chrome-row sweep stylesheet.
-/// 3. `chat-fingerprint.js` — the last script to run, so it sees the
-///    page environment from the very first frame: it freezes
-///    `navigator.webdriver` to `undefined`, installs a real
-///    `NavigatorUAData` shim with a function `getHighEntropyValues`,
-///    sets `navigator.platform` / `languages` / `hardwareConcurrency` /
-///    etc. to plausible Chrome values, exposes `window.chrome`,
-///    `navigator.plugins`, and `Notification` shims, adds low-entropy
-///    jitter to canvas / WebGL fingerprinting, makes
-///    `Permissions.prototype.query` resolve to `'prompt'` for clipboard
-///    and notification probes, and finally captures the real
-///    `window.__TAURI__` into a closure-scoped variable before
-///    replacing the global with a Proxy that satisfies `typeof` checks
-///    but rejects every `invoke`.
+/// 3. `chat-fingerprint.js` — the last script to run: pins
+///    `navigator.webdriver` to `false` (the value a normal non-automated
+///    browser reports) and deletes the `__TAURI__` / `__TAURI_INTERNALS__`
+///    / `__TAURI_METADATA__` / `__TAURI_IPC__` globals outright — a
+///    normal browser has no such globals, so page probes must see none.
 ///
 /// The command is `async` so the caller can observe the real build result
 /// rather than just "a thread was started". The builder runs on a fresh OS
@@ -769,7 +760,6 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
                 WebviewWindowBuilder::new(&handle, "official-chat", WebviewUrl::External(url))
                     .title("DeepSeek 官方对话")
                     .inner_size(1280.0, 840.0)
-                    .incognito(true)
                     .data_directory(profile_dir)
                     .additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)
                     .initialization_script(include_str!("pullstring-launcher.js"))
