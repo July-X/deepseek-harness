@@ -54,13 +54,11 @@
 ```text
 desktop/
 ├── package.json              # 仅 @tauri-apps/cli 脚本；不进 pnpm workspace（pnpm-lock.yaml 独立管理）
-├── ui/                       # 管理面板（零构建静态前端）
-│   ├── index.html
-│   ├── styles.css
-│   ├── plugins.js            # 插件管理卡片（安装/更新/目录搜索/更新提醒）
-│   ├── skills.js             # 技能管理卡片（包安装/手动安装/更新提醒/即时生效提示）
-│   ├── whale-icon.png        # 顶栏 logo（60 CSS px 显示，故由 assets/whale-icon-small.svg 渲染 128px）
-│   └── app.js
+├── ui/                       # 管理面板前端（Vue 3 + Element Plus，Vite 构建）
+│   ├── index.html            # SPA 入口（加载 src/main.js）
+│   ├── public/               # 静态资源：whale-icon.png 顶栏 logo
+│   ├── src/                  # 源码：App.vue / 各面板组件 / store / plugins / skills / theme.css
+│   └── dist/                 # vite build 产物（tauri.conf.json 的 frontendDist）
 ├── docs/
 │   ├── plugin-management.md  # 插件管理设计（目录布局、链接/复制双模式、接线、更新机制）
 │   └── skill-management.md   # 技能管理设计（中央库 + 物化到 ~/.dsh/skills，热生效，无需接线）
@@ -69,9 +67,9 @@ desktop/
 │   ├── whale-icon-small.svg  # 小尺寸母版（红眼夸大版，用于 ≤64px 与 favicon 投影）
 │   └── whale-icon-512.png    # 512px 位图（脚本从 whale-icon.svg 渲染）
 ├── scripts/
-│   └── build-icons.sh        # 从双 SVG 母版再生成全部图标：src-tauri/icons、ui/whale-icon.png、website 与 apps/web 的 favicon
+│   └── build-icons.sh        # 从双 SVG 母版再生成全部图标：src-tauri/icons、ui/public/whale-icon.png、website 与 apps/web 的 favicon
 ├── src-tauri/
-│   ├── tauri.conf.json       # Tauri v2 配置（frontendDist → ../ui）
+│   ├── tauri.conf.json       # Tauri v2 配置（frontendDist → ../ui/dist）
 │   ├── Cargo.toml
 │   ├── capabilities/default.json
 │   ├── icons/                # 应用图标集（黑鲸+红眼，由 assets 管线生成并提交）
