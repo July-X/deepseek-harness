@@ -18,10 +18,10 @@
  *   to land beside the sidebar-collapse button (the comment near the
  *   offset documents the geometry in detail).
  *
- * - DeepSeek official chat: DeepSeek blue cord (#4D6BFE) at left:12px,
- *   hugging the chat's own top-left chrome — the chat page has no
- *   sidebar, so the workbench's 212px offset would put the lamp in
- *   empty space.
+ * - DeepSeek official chat: DeepSeek blue cord (#4D6BFE) at right:12px,
+ *   mirrored to the right edge (formerly left:12px) — the chat page has no
+ *   sidebar, so the workbench's 212px offset would put the lamp in empty
+ *   space.
  *
  * The widget talks back to the shell over `window.__TAURI__.core.invoke`
  * (tauri.conf.json sets `withGlobalTauri: true`), so it needs no
@@ -57,7 +57,8 @@
 
   // Surface selection by hostname: the dsh web workbench is a 127.0.0.1
   // origin and so is anything else we might inject into; chat.deepseek.com
-  // is the only place the DeepSeek brand palette and the 12px offset apply.
+  // is the only place the DeepSeek brand palette and the right-edge anchor
+  // apply.
   var isOfficial = window.location.hostname === "chat.deepseek.com";
   var PALETTE = isOfficial
     ? {
@@ -68,7 +69,12 @@
         cord: "#609926",
         cordHover: "#7dbd45",
       };
-  var LEFT_PX = isOfficial ? "12px" : "212px";
+  // 官方对话窗口的拉绳灯挂在右侧边缘（right:12px，与原先的左侧 left:12px 镜像
+  // 对称）；dsh web 工作台仍贴左侧 left:212px（在品牌 logo 右侧、侧栏折叠键旁）。
+  // SVG（绳/底座/灯泡/灯丝）全部以 x=12 为中心左右对称，故仅切换锚定边即可，
+  // 无需水平翻转图形。
+  var SIDE = isOfficial ? "right" : "left";
+  var EDGE_PX = isOfficial ? "12px" : "212px";
 
   var ROOT_ID = "dsh-shell-launcher";
   var STYLE_ID = "dsh-shell-launcher-style";
@@ -93,13 +99,14 @@
       "#" + ROOT_ID + " {",
       "  position: fixed;",
       "  top: 0;",
-      /* Hang next to the chrome corner of the page: 212px on the dsh web
+      /* Hang at the chrome corner of the page: left:212px on the dsh web
          workbench (right of the brand logo, beside the sidebar-collapse
-         button), 12px on chat.deepseek.com (no sidebar, hug the page's
-         own top-left). Plain window resizes leave both anchors alone —
-         the workbench's sidebar is fixed-width and the chat has nothing
-         to align against. */
-      "  left: " + LEFT_PX + ";",
+         button), right:12px on chat.deepseek.com (mirrored from the former
+         left:12px to the right edge — the chat page has no sidebar, so the
+         workbench's 212px offset would put the lamp in empty space). Plain
+         window resizes leave both anchors alone — the workbench's sidebar is
+         fixed-width and the chat has nothing to align against. */
+      "  " + SIDE + ": " + EDGE_PX + ";",
       "  z-index: 2147483647;",
       "  pointer-events: none;",
       "}",
