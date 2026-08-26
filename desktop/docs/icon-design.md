@@ -7,17 +7,17 @@
 ```
 assets/
 ├── whale-icon.svg          # ≥128px（完整红眼细节）
-├── whale-icon-small.svg    # ≤64px、favicon、ui/whale-icon.png
+├── whale-icon-small.svg    # ≤64px、favicon、ui/public/whale-icon.png
 └── whale-icon-512.png      # 512px 位图（脚本从 whale-icon.svg 渲染）
 ```
 
-面板顶栏只按 60 CSS px 显示 `ui/whale-icon.png`（由 `whale-icon-small.svg` 渲染 128px）；小尺寸下细节是亚像素，必须简化。
+面板顶栏只按 60 CSS px 显示 `ui/public/whale-icon.png`（由 `whale-icon-small.svg` 渲染 128px）；小尺寸下细节是亚像素，必须简化。
 
 改设计只改两个 SVG 母版，然后跑 `scripts/build-icons.sh`（需 rsvg-convert + ImageMagick + macOS iconutil）一次性再生成：
 
 - `src-tauri/icons` 全套（按尺寸选母版合成 ico/icns）
 - `assets/whale-icon-512.png`
-- `ui/whale-icon.png`（小母版渲染 128px）
+- `ui/public/whale-icon.png`（小母版渲染 128px）
 - `website/public/favicon.svg`（品牌蓝鲸身）
 - `apps/web/public/favicon.svg`（深色模式转白，`pwa-manifest.e2e.ts` 锁定该行为）
 
@@ -36,7 +36,7 @@ macOS Dock 不给图标加任何背景或蒙版（圆角是 artwork 自带的约
 
 三个反面教材：瓦片铺满画布 → 视觉上比其他 Dock 图标大一圈；角落压成白色 → 读作硬白方块；没有瓦片全透明 → 只剩黑色鲸鱼剪影。
 
-输出必须保持 RGBA（`png:color-type=6`；`tauri::generate_context!` 编译期拒绝 RGB 图）。`ui/whale-icon.png` 和 `website` / `apps/web` 的 SVG favicon 不参与这步——它们继续全透明，分别叠在深色面板顶栏和网页背景上。
+输出必须保持 RGBA（`png:color-type=6`；`tauri::generate_context!` 编译期拒绝 RGB 图）。`ui/public/whale-icon.png` 和 `website` / `apps/web` 的 SVG favicon 不参与这步——它们继续全透明，分别叠在深色面板顶栏和网页背景上。
 
 再生成只能走 macOS 上的 `build-icons.sh`（rsvg-convert + ImageMagick + iconutil，release runner 即 macOS）；仓库不保留 Windows 再生成脚本——提交在仓库里的 PNG 已是套板成品，从它们二次合成会得到双重缩小的错误结果。
 

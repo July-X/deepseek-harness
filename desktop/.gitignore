@@ -1,4 +1,5 @@
 node_modules/
+ui/dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 # pnpm-lock.yaml is the authoritative lockfile for this package; the

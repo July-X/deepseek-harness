@@ -78,11 +78,11 @@ jobs:
         with:
           node-version: 24
 
-      # desktop/ is deliberately outside the pnpm workspace; without
-      # --ignore-workspace pnpm walks up to the monorepo root (see
-      # desktop/AGENTS.md).
+      # desktop/pnpm-workspace.yaml makes desktop/ its own pnpm root
+      # (allowBuilds 放行 esbuild postinstall)——不要加 --ignore-workspace，
+      # 它会跳过该文件，strictDepBuilds 下 esbuild 构建脚本变成硬错误。
       - name: Install the Tauri CLI
-        run: pnpm install --ignore-workspace
+        run: pnpm install
         working-directory: desktop
 
       - name: Build and publish
