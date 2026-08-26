@@ -738,8 +738,10 @@ pub fn open_log_window(app: AppHandle, name: String) -> Result<(), String> {
 /// macOS/Linux the toggle is a harmless no-op raise.
 ///
 /// `x`/`y` are the click's screen coordinates in CSS pixels
-/// (`MouseEvent.screenX/Y`); when present the panel is first repositioned
-/// next to the click so the user never has to hunt for it on another
+/// (`MouseEvent.screenX/Y`); when present the panel is first repositioned so
+/// the click's x lands at the window's horizontal center while the top sits
+/// just below the click's y (clamped to keep the window fully on the
+/// containing monitor), so the user never has to hunt for it on another
 /// monitor. They are optional so an older injected script that invokes
 /// without arguments still raises the window in place.
 #[tauri::command]
@@ -1082,9 +1084,14 @@ fn reposition_near(app: &AppHandle, window: &tauri::WebviewWindow, x: f64, y: f6
         .outer_size()
         .unwrap_or(tauri::PhysicalSize::new(480, 800));
     let (ww, wh) = (win.width as f64 / s, win.height as f64 / s);
-    // +12px keeps the panel clear of the cursor itself; the `.max(m*)`
-    // guards against windows wider/taller than the monitor.
-    let nx = (x + 12.0).clamp(mx, (mx + mw - ww).max(mx));
+    // Center the panel horizontally on the click's x so the pull lands at
+    // the window's horizontal middle; keep the vertical anchor as before —
+    // the top sits ~12px below the click (clear of the cursor) — so the
+    // window drops down from the lamp rather than straddling it vertically.
+    // The `.clamp(..)` keeps the window fully on the containing monitor when
+    // the click is near an edge; the `.max(m*)` guards against windows wider
+    // or taller than the monitor (an otherwise inverted clamp range).
+    let nx = (x - ww / 2.0).clamp(mx, (mx + mw - ww).max(mx));
     let ny = (y + 12.0).clamp(my, (my + mh - wh).max(my));
     let _ = window.set_position(tauri::LogicalPosition::new(nx, ny));
 }
