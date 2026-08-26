@@ -1,7 +1,8 @@
 <script setup>
 // 概览：当前内核状态、工作台启停单按钮状态机、首次运行引导、
-// 外壳自更新与启动容错横幅。内核生命周期是实现细节，只暴露
-// 「启动工作台 / 关闭工作台」；「打开工作台窗口 / 查看日志」是次级入口。
+// 外壳更新横幅与安装入口（手动检查在侧栏品牌区）以及启动容错横幅。
+// 内核生命周期是实现细节，只暴露「启动工作台 / 关闭工作台」；
+// 「打开工作台窗口 / 查看日志」是次级入口。
 import { computed } from 'vue';
 import {
   SwitchButton,
@@ -22,7 +23,6 @@ import {
   stopWorkbench,
   openHarnessWindow,
   openDataDir,
-  checkShellUpdate,
   installShellUpdate,
   installLatestRelease,
   checkUpdates,
@@ -190,14 +190,6 @@ function goVersions() {
           打开工作台窗口
         </el-button>
         <el-button text :icon="Document" @click="showLogs">查看日志</el-button>
-        <el-button
-          text
-          :icon="Refresh"
-          :loading="isLoading('checkShellUpdate')"
-          @click="checkShellUpdate(true)"
-        >
-          检查桌面端更新
-        </el-button>
         <el-button
           v-if="store.shellUpdateVersion"
           type="warning"

@@ -23,6 +23,7 @@ import SettingsPanel from './components/SettingsPanel.vue';
 import ProgressOverlay from './components/ProgressOverlay.vue';
 import LogModal from './components/LogModal.vue';
 import IncidentModal from './components/IncidentModal.vue';
+import DebugPanel from './components/DebugPanel.vue';
 
 const PANELS = {
   overview: OverviewPanel,
@@ -137,4 +138,5 @@ onUnmounted(() => {
   <ProgressOverlay />
   <LogModal />
   <IncidentModal />
+  <DebugPanel />
 </template>

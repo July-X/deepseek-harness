@@ -2,8 +2,9 @@
 // 侧栏：品牌区（logo + 状态胶囊）+ 主菜单 + 底部安全提示。
 // 菜单激活项由 store.activePanel 驱动，切换带指示条与背景动效。
 import { computed } from 'vue';
-import { Odometer, Box, Connection, MagicStick, SetUp, Warning } from '@element-plus/icons-vue';
-import { store } from '../store.js';
+import { Odometer, Box, Connection, MagicStick, SetUp, Warning, Refresh } from '@element-plus/icons-vue';
+import { store, checkShellUpdate } from '../store.js';
+import { isLoading } from '../loading.js';
 import { pluginStore } from '../plugins.js';
 import { skillStore } from '../skills.js';
 
@@ -37,6 +38,19 @@ const status = computed(() => {
         <span class="dot" :class="status.cls"></span>
         <span>{{ status.text }}</span>
       </div>
+      <!-- 桌面端自更新检查入口（原概览页按钮）：业务逻辑不变，仍走
+           checkShellUpdate(true)，发现新版本时在概览页横幅里安装。 -->
+      <el-button
+        class="brand-update"
+        text
+        size="small"
+        :icon="Refresh"
+        :loading="isLoading('checkShellUpdate')"
+        title="检查桌面端更新"
+        @click="checkShellUpdate(true)"
+      >
+        更新
+      </el-button>
     </div>
 
     <nav class="menu" aria-label="主菜单">
