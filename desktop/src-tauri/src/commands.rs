@@ -841,17 +841,34 @@ pub fn close_official_chat(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Tear down the management window after the user confirmed a full quit
-/// from the request-quit-confirm prompt. The window-close interceptor in
-/// `lib::run` calls `prevent_close()` first so this `destroy()` is the
-/// only thing that lets the OS X button actually close the panel; the
+/// Tear down the whole shell after the user confirmed a full quit from the
+/// request-quit-confirm prompt. The window-close interceptor in `lib::run`
+/// calls `prevent_close()` first so this `destroy()` is the only thing
+/// that lets the OS X button actually close the management panel; the
 /// `RunEvent::Exit` handler then reaps any kernel leftovers via pid file.
+///
+/// The confirmed quit must close **every** window itself rather than
+/// delegating to the `RunEvent::Exit` handler: that event only fires once
+/// the whole event loop terminates, which on Windows/Linux requires the
+/// last window to be gone and on macOS happens only on an explicit quit
+/// (closing all windows keeps the app alive). Leaving `official-chat` (or
+/// any transient window) for the Exit branch would strand it — and with it
+/// the whole app on macOS — after the panel is already gone. So destroy
+/// the transient windows first, then the main window, then exit the loop
+/// itself so the Exit branch still runs on every platform.
 #[tauri::command]
 pub fn confirm_close_shell(app: AppHandle) -> Result<(), String> {
-    let Some(window) = app.get_webview_window("main") else {
-        return Err("主壳窗口不存在（label: main）".to_string());
-    };
-    window.destroy().map_err(|e| e.to_string())
+    let main = app
+        .get_webview_window("main")
+        .ok_or("主壳窗口不存在（label: main）")?;
+    for label in ["official-chat", "harness", "log-viewer"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.destroy();
+        }
+    }
+    main.destroy().map_err(|e| e.to_string())?;
+    app.exit(0);
+    Ok(())
 }
 
 /// Move `window` so its top-left corner sits just below-right of the

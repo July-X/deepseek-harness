@@ -142,13 +142,23 @@ pub fn run() {
     // run (e.g. after a crash), guarded by `kill_pid`'s kernel check.
     //
     // Closing the management window fires `WindowEvent::CloseRequested` *before*
-    // `RunEvent::Exit`. When the kernel is still running we `prevent_close()`
-    // and ping the UI to ask the user whether to fully quit — the UI then runs
-    // `stop_kernel` followed by `confirm_close_shell`, which destroys the main
-    // window programmatically. Without this prompt the user could close the
-    // panel, leave an orphan kernel holding the port, and a later start
-    // would fail with the misleading "port already open" diagnostic until
-    // the orphan is reaped on the next shell launch.
+    // `RunEvent::Exit`. When the kernel is still running — or the official-chat
+    // window is open — we `prevent_close()` and ping the UI to ask the user
+    // whether to fully quit; the UI then runs `stop_kernel` (when running)
+    // followed by `confirm_close_shell`, which destroys every window and exits
+    // the event loop. Without this prompt the user could close the panel,
+    // leave an orphan kernel holding the port, and a later start would fail
+    // with the misleading "port already open" diagnostic until the orphan is
+    // reaped on the next shell launch.
+    //
+    // The prompt path cannot rely on `RunEvent::Exit` for window teardown:
+    // `confirm_close_shell` destroys the main window, but the event loop only
+    // terminates once the LAST window is gone (and on macOS not even then —
+    // it needs an explicit exit), so a still-open `official-chat` window would
+    // keep the loop — and the app — alive with nobody left to close it. The
+    // Exit branch below therefore is only the fallback for exits that bypass
+    // the prompt (Cmd+Q, OS shutdown, last-window auto-close on Windows/Linux
+    // when nothing needed a warning).
     app.run(|handle, event| {
         if let tauri::RunEvent::WindowEvent {
             label,
@@ -185,11 +195,15 @@ pub fn run() {
             // exit and reaps any pid-file leftover from an earlier crash.
         }
         if let tauri::RunEvent::Exit = event {
-            // Cascade-close the official-chat panel-driven window on every
-            // real exit — the confirmed-quit path from the prompt, OS
-            // shutdown, or a close that needed no warning. Same rationale as
-            // the WindowEvent handler above: official-chat is a transient
-            // panel-driven window and closing the panel implies closing it.
+            // Cascade-close the official-chat panel-driven window on exits
+            // that bypassed the quit prompt (Cmd+Q on macOS, OS shutdown,
+            // last-window auto-close when nothing needed a warning). The
+            // confirmed-quit path already destroyed every window in
+            // `confirm_close_shell` before exiting the loop — Exit is the
+            // fallback net here, not the primary teardown. Same rationale
+            // as the WindowEvent handler above: official-chat is a
+            // transient panel-driven window and closing the panel implies
+            // closing it.
             if let Some(oc) = handle.get_webview_window("official-chat") {
                 let _ = oc.destroy();
             }

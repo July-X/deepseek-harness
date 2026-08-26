@@ -72,7 +72,8 @@ let pollTimer = null;
 const startupTimers = [];
 
 // 完全退出确认：Rust 侧在内核运行或官方对话打开时拦截主窗口关闭（prevent_close），
-// 由这里弹确认框；用户确认后先停内核（释放端口）再销毁窗口。
+// 由这里弹确认框；用户确认后先停内核（释放端口），再经 confirm_close_shell
+// 销毁全部窗口并退出（Rust 侧负责收尾，不依赖 RunEvent::Exit 关窗）。
 // pending 标记压住用户在弹窗期间连续点 X 的重入。
 let quitConfirmPending = false;
 function onQuitConfirmRequest(event) {
