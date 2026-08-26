@@ -71,22 +71,31 @@ watchEffect(() => {
 let pollTimer = null;
 const startupTimers = [];
 
-// 完全退出确认：Rust 侧在内核仍在运行时拦截主窗口关闭（prevent_close），
+// 完全退出确认：Rust 侧在内核运行或官方对话打开时拦截主窗口关闭（prevent_close），
 // 由这里弹确认框；用户确认后先停内核（释放端口）再销毁窗口。
 // pending 标记压住用户在弹窗期间连续点 X 的重入。
 let quitConfirmPending = false;
-function onQuitConfirmRequest() {
+function onQuitConfirmRequest(event) {
   if (quitConfirmPending) return;
+  const payload = event && event.payload ? event.payload : {};
+  const kernelRunning = !!payload.kernel_running;
+  const chatOpen = !!payload.official_chat_open;
+  let detail;
+  if (kernelRunning && chatOpen) {
+    detail = '工作台与官方对话窗口仍在运行。关闭主壳会一并关闭它们；继续吗？';
+  } else if (chatOpen) {
+    detail = '官方对话窗口仍打开。关闭主壳会一并关闭它（登录状态已保留）；继续吗？';
+  } else {
+    detail = '工作台仍在运行。关闭主壳前需要先关闭工作台；继续吗？';
+  }
   quitConfirmPending = true;
-  confirmDialog(
-    '完全退出？',
-    '工作台仍在运行。关闭主壳前需要先关闭工作台；继续吗？',
-    '关闭并退出'
-  )
+  confirmDialog('完全退出？', detail, '关闭并退出')
     .then((ok) => {
       if (!ok) return null;
-      return invoke('stop_kernel')
-        .catch((e) => toastError('关闭工作台失败：' + e))
+      const stop = kernelRunning
+        ? invoke('stop_kernel').catch((e) => toastError('关闭工作台失败：' + e))
+        : Promise.resolve();
+      return stop
         .then(() => invoke('confirm_close_shell'))
         .catch((e) => toastError('退出失败：' + e + '（请手动关闭窗口）', 6000));
     })

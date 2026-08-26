@@ -489,6 +489,12 @@ main {
   transform: scale(0.96);
 }
 
+.el-button.official-chat-open,
+.el-button.official-chat-open:hover,
+.el-button.official-chat-open:focus-visible {
+  color: var(--good);
+}
+
 /* 首次运行 / 容错横幅。 */
 .callout {
   display: flex;

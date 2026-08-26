@@ -28,6 +28,7 @@
           "start_kernel",
           "stop_kernel",
           "open_harness",
+          "open_log_window",
           "open_official_chat",
           "close_official_chat",
           "focus_main_shell",
@@ -39,6 +40,7 @@
           "plugin_set_mode",
           "plugin_check_updates",
           "plugin_catalog",
+          "plugin_resolve",
           "skill_status",
           "skill_install",
           "skill_update",
@@ -47,6 +49,13 @@
           "skill_check_updates",
           "confirm_close_shell"
         ]
+      }
+    },
+    {
+      "identifier": "allow-log-viewer",
+      "description": "Read-only log access for the standalone log viewer window (label \"log-viewer\", opened by open_log_window). The window renders one file's tail via read_log_file and nothing else; the panel keeps the full command set via allow-local-commands.",
+      "commands": {
+        "allow": ["read_log_file"]
       }
     }
   ]

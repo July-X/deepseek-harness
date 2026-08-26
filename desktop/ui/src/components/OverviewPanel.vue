@@ -2,12 +2,13 @@
 // 概览：当前内核状态、工作台启停单按钮状态机、首次运行引导、
 // 外壳更新横幅与安装入口（手动检查在侧栏品牌区）以及启动容错横幅。
 // 内核生命周期是实现细节，只暴露「启动工作台 / 关闭工作台」；
-// 「打开工作台窗口 / 查看日志」是次级入口。
+// 「打开工作台窗口 / 打开官方对话 / 查看日志」是次级入口。
 import { computed } from 'vue';
 import {
   SwitchButton,
   TopRight,
   Document,
+  ChatDotRound,
   Refresh,
   FolderOpened,
   Download,
@@ -22,6 +23,7 @@ import {
   startWorkbench,
   stopWorkbench,
   openHarnessWindow,
+  toggleOfficialChat,
   openDataDir,
   installShellUpdate,
   installLatestRelease,
@@ -34,6 +36,8 @@ const kernel = computed(() => store.view && store.view.kernel);
 const node = computed(() => store.view && store.view.node);
 
 const running = computed(() => !!(kernel.value && kernel.value.running));
+const officialChatOpen = computed(() => !!(store.view && store.view.official_chat_open));
+const officialChatLabel = computed(() => (officialChatOpen.value ? '关闭官方对话' : '打开官方对话'));
 const canStart = computed(() => !!(kernel.value && kernel.value.active && kernel.value.active_installed));
 const noKernel = computed(() => !!(kernel.value && (!kernel.value.installed || kernel.value.installed.length === 0)));
 
@@ -188,6 +192,17 @@ function goVersions() {
           @click="openHarnessWindow"
         >
           打开工作台窗口
+        </el-button>
+        <el-button
+          text
+          :icon="ChatDotRound"
+          :class="{ 'official-chat-open': officialChatOpen }"
+          :disabled="store.starting || globalBusy"
+          :loading="isLoading('officialChat')"
+          title="打开或关闭 DeepSeek 官方对话"
+          @click="toggleOfficialChat"
+        >
+          {{ officialChatLabel }}
         </el-button>
         <el-button text :icon="Document" @click="showLogs">查看日志</el-button>
         <el-button

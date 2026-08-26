@@ -11,7 +11,7 @@ import { refreshSkills } from './skills.js';
 import { showLogs } from './logs.js';
 
 export const store = reactive({
-  // get_status 的完整返回：{ kernel, node, settings, shell_version, dev_build, quarantined, last_incident }
+  // get_status 的完整返回：{ kernel, node, settings, shell_version, dev_build, quarantined, last_incident, official_chat_open }
   view: null,
   releases: [],
   releaseWarning: '',
@@ -257,6 +257,18 @@ export async function stopWorkbench() {
 export function openHarnessWindow() {
   return withLoading('openHarness', () =>
     invoke('open_harness').catch((e) => toastError('无法打开工作台窗口：' + e))
+  );
+}
+
+// 官方会话窗口由 Rust 管理；命令完成后立即刷新状态，让按钮文案同步窗口实际状态。
+export function toggleOfficialChat() {
+  const open = !!(store.view && store.view.official_chat_open);
+  const command = open ? 'close_official_chat' : 'open_official_chat';
+  const errorPrefix = open ? '关闭官方对话窗口失败：' : '无法打开官方对话窗口：';
+  return withLoading('officialChat', () =>
+    invoke(command)
+      .then(() => refreshAll())
+      .catch((e) => toastError(errorPrefix + e, 5000))
   );
 }
 
