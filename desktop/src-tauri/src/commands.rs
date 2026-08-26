@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -20,6 +20,34 @@ use crate::error::AppError;
 use crate::process::read_tail;
 use crate::quarantine;
 use crate::{guard, kernel, node, plugins, releases, settings, skills, updater};
+
+/// DeepSeek official chat entrypoint that `open_official_chat` loads into
+/// the dedicated `official-chat` webview.
+///
+/// No user-agent override for this window: the WebView2 engine IS a genuine
+/// desktop Edge/Chromium build. Overriding the UA string claims Chrome in
+/// the header while `Sec-CH-UA` client hints and native
+/// `navigator.userAgentData` keep reporting the real Edge brand — that
+/// cross-layer mismatch is exactly what environment checks flag, so the
+/// honest identity is also the consistent one.
+pub const OFFICIAL_CHAT_URL: &str = "https://chat.deepseek.com";
+
+/// Chromium feature switches passed to the `official-chat` webview.
+///
+/// `additional_browser_args` **replaces** wry's built-in default set
+/// (`--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`), so
+/// those entries are restated here instead of silently re-enabled: without
+/// them WebView2 shows SmartScreen interstitials and Edge-only overlay UI a
+/// normal desktop Chrome never has. On top of those, `AutomationControlled`
+/// (both as a browser feature and as a blink runtime flag) keeps Chromium
+/// from reporting `navigator.webdriver = true` at the engine level — before
+/// any initialization script can mask it — and `TranslateUI` /
+/// `InterestFeedContentSuggestions` suppress more Edge-only surfaces. Only
+/// the WebView2 backend consumes browser args; macOS / Linux ignore them,
+/// so the builder wiring stays branch-free. The same per-folder options
+/// rule is why [`open_official_chat`] pairs this constant with a dedicated
+/// user-data directory.
+pub const OFFICIAL_CHAT_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AutomationControlled,TranslateUI,InterestFeedContentSuggestions --disable-blink-features=AutomationControlled";
 
 /// Shared shell state installed as a Tauri managed state.
 pub struct AppState {
@@ -53,10 +81,15 @@ pub struct StatusView {
     /// `last-incident.json`, so「查看详情」keeps working after a relaunch
     /// instead of only in the start command's response.
     pub last_incident: Option<guard::Incident>,
+    /// Whether the dedicated `official-chat` webview window is currently
+    /// registered with the app. The status poll observes this on the same
+    /// 2.5s cadence so the panel's button label flips between
+    /// 「打开官方对话」 and 「关闭官方对话」 without an extra IPC round-trip.
+    pub official_chat_open: bool,
 }
 
-/// Read a bounded tail of a text file for display — moved to
-/// [`crate::process::read_tail`] so the boot guard reads the same way.
+// Read a bounded tail of a text file for display — moved to
+// `crate::process::read_tail` so the boot guard reads the same way.
 
 /// The web-app level error prefix the UI must not swallow.
 fn app_err(data_dir: &Path, e: impl std::fmt::Display) -> String {
@@ -76,6 +109,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
         let quarantine_doc = quarantine::load(&data_dir);
         let state = app.state::<AppState>();
         let node_info = cached_node(&state, &settings);
+        let official_chat_open = app.get_webview_window("official-chat").is_some();
         StatusView {
             shell_version: app.package_info().version.to_string(),
             dev_build: cfg!(debug_assertions),
@@ -84,6 +118,7 @@ pub async fn get_status(app: AppHandle, state: State<'_, AppState>) -> Result<St
             quarantined: quarantine_doc.items,
             last_incident: guard::load_incident(&data_dir),
             settings,
+            official_chat_open,
         }
     })
     .await
@@ -342,21 +377,19 @@ pub async fn install_kernel(
         let mut send = move |msg: &str| {
             let _ = on_event_for_start.send(msg.to_string());
         };
-        let start_result = tauri::async_runtime::spawn_blocking(move || -> Result<
-            (guard::StartReport, Option<Child>),
-            String,
-        > {
-            let settings = settings::load(&dir_for_start);
-            let (_, pnpm_exe) =
-                promise_pnpm(&dir_for_start, &node_info_for_start, &mut send)?;
-            let deps = guard::GuardDeps {
-                data_dir: &dir_for_start,
-                settings: &settings,
-                node_path: &node_path,
-                pnpm_exe: &pnpm_exe,
-            };
-            Ok(guard::guarded_start(&deps, &mut send))
-        })
+        let start_result = tauri::async_runtime::spawn_blocking(
+            move || -> Result<(guard::StartReport, Option<Child>), String> {
+                let settings = settings::load(&dir_for_start);
+                let (_, pnpm_exe) = promise_pnpm(&dir_for_start, &node_info_for_start, &mut send)?;
+                let deps = guard::GuardDeps {
+                    data_dir: &dir_for_start,
+                    settings: &settings,
+                    node_path: &node_path,
+                    pnpm_exe: &pnpm_exe,
+                };
+                Ok(guard::guarded_start(&deps, &mut send))
+            },
+        )
         .await
         .map_err(|e| e.to_string())?;
         let (report, child) = start_result?;
@@ -646,6 +679,131 @@ pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Resul
     let _ = window.set_always_on_top(true);
     let _ = window.set_always_on_top(false);
     window.set_focus().map_err(|e| e.to_string())
+}
+
+/// Open the DeepSeek official chat in a dedicated WebviewWindow.
+///
+/// Same threading pattern as `open_harness`: the webview must be built on a
+/// fresh OS thread to avoid the documented Windows deadlock from
+/// `WebviewWindowBuilder::new` inside a synchronous command on the Tauri
+/// main thread, and the new thread is named so it shows up in stack
+/// samples when something goes wrong.
+///
+/// The URL is fixed to [`OFFICIAL_CHAT_URL`]; the lamp / pulse script
+/// decides per-call colors and offsets from the page's `hostname`, so the
+/// same two injected files serve both the green workbench and the blue
+/// official chat.
+///
+/// The window is **not** `closable(false)`: a webview to a third-party
+/// origin has no kernel session to protect, so the OS chrome close button
+/// should keep working. Repeat clicks reuse the existing window via
+/// `app.get_webview_window("official-chat")` and re-focus it.
+///
+/// No user-agent override — see the note above [`OFFICIAL_CHAT_URL`]: an
+/// honest desktop-Edge identity keeps every layer consistent.
+/// `.additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)` disables
+/// the engine-level automation switches (`navigator.webdriver`) and keeps
+/// SmartScreen / Edge-only UI off; the constant restates wry's default
+/// disable-list because passing browser args replaces it. Custom browser
+/// arguments only work on their own user-data folder (WebView2 requires
+/// identical environment options across one folder), so the builder pins
+/// `.data_directory` to `<data_dir>/webview-official-chat` instead of the
+/// default folder the panel and harness windows share.
+/// `.incognito(true)`
+/// keeps each chat session clean — no shared
+/// cookies or storage with other official-chat windows — so the same
+/// identity is not accidentally reused across reloads.
+///
+/// Three `initialization_script` calls harden the browser fingerprint
+/// before any page script executes. They run in the order added on every
+/// new document, so the chain is load-bearing:
+///
+/// 1. `pullstring-launcher.js` — captures a reference to the real
+///    `window.__TAURI__` at module top into a closure-scoped variable,
+///    so the lamp still has a working IPC bridge after step 3 replaces
+///    the global.
+/// 2. `titlebar-pulse.js` — appends the chrome-row sweep stylesheet.
+/// 3. `chat-fingerprint.js` — the last script to run, so it sees the
+///    page environment from the very first frame: it freezes
+///    `navigator.webdriver` to `undefined`, installs a real
+///    `NavigatorUAData` shim with a function `getHighEntropyValues`,
+///    sets `navigator.platform` / `languages` / `hardwareConcurrency` /
+///    etc. to plausible Chrome values, exposes `window.chrome`,
+///    `navigator.plugins`, and `Notification` shims, adds low-entropy
+///    jitter to canvas / WebGL fingerprinting, makes
+///    `Permissions.prototype.query` resolve to `'prompt'` for clipboard
+///    and notification probes, and finally captures the real
+///    `window.__TAURI__` into a closure-scoped variable before
+///    replacing the global with a Proxy that satisfies `typeof` checks
+///    but rejects every `invoke`.
+///
+/// The command is `async` so the caller can observe the real build result
+/// rather than just "a thread was started". The builder runs on a fresh OS
+/// thread (same Windows-deadlock reasoning as `open_harness`) and ships
+/// the `Result<WebviewWindow, tauri::Error>` back over a `std::sync::mpsc`
+/// channel; a `spawn_blocking` await picks it up so the Tauri command only
+/// resolves `Ok(())` after the window is actually registered with the app.
+#[tauri::command]
+pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window("official-chat") {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let url = Url::parse(OFFICIAL_CHAT_URL).map_err(|e| e.to_string())?;
+    let handle = app.clone();
+    // WebView2 requires every environment on a user-data folder to share
+    // identical options — additional browser arguments included. The panel
+    // and harness windows already run a default-options environment on the
+    // default folder, so this window needs its own folder or environment
+    // creation fails and the window never appears.
+    let profile_dir = {
+        let state = app.state::<AppState>();
+        state.data_dir.join("webview-official-chat")
+    };
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("dsh-open-official-chat".into())
+        .spawn(move || {
+            let _ = fs::create_dir_all(&profile_dir);
+            let result =
+                WebviewWindowBuilder::new(&handle, "official-chat", WebviewUrl::External(url))
+                    .title("DeepSeek 官方对话")
+                    .inner_size(1280.0, 840.0)
+                    .incognito(true)
+                    .data_directory(profile_dir)
+                    .additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)
+                    .initialization_script(include_str!("pullstring-launcher.js"))
+                    .initialization_script(include_str!("titlebar-pulse.js"))
+                    .initialization_script(include_str!("chat-fingerprint.js"))
+                    .build();
+            if let Err(ref e) = result {
+                eprintln!("dsh-desktop: failed to open official chat window: {e}");
+            }
+            let _ = tx.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+    let built = tauri::async_runtime::spawn_blocking(move || rx.recv().ok())
+        .await
+        .map_err(|e| e.to_string())?;
+    match built {
+        Some(Ok(_)) => Ok(()),
+        Some(Err(e)) => Err(format!("无法打开官方对话窗口：{e}")),
+        None => Err("官方对话窗口创建线程已结束，未返回结果".to_string()),
+    }
+}
+
+/// Close the DeepSeek official chat webview if it is currently open.
+///
+/// Returns an error when the window was never opened (or was already torn
+/// down by the OS chrome close button) so the panel's toggle can surface a
+/// sensible message instead of silently no-op'ing. The button label flips
+/// back to "打开官方对话" on the next status poll once the window is gone.
+#[tauri::command]
+pub fn close_official_chat(app: AppHandle) -> Result<(), String> {
+    app.get_webview_window("official-chat")
+        .ok_or("官方对话窗口未打开".to_string())?
+        .destroy()
+        .map_err(|e| e.to_string())
 }
 
 /// Tear down the management window after the user confirmed a full quit

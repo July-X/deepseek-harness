@@ -3665,11 +3665,9 @@ mod tests {
         );
         // The healthy plugin was still materialized and the manifest kept
         // its wiring — one bad plugin no longer blocks everything else.
-        assert!(
-            kernel_plugin_dir(&data_dir, version, "healthy")
-                .join("package.json")
-                .is_file()
-        );
+        assert!(kernel_plugin_dir(&data_dir, version, "healthy")
+            .join("package.json")
+            .is_file());
         let on_disk = fs::read_to_string(profile.join("package.json")).unwrap();
         assert!(on_disk.contains("healthy-plugin"));
     }

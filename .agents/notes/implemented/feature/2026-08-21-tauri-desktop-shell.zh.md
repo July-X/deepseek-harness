@@ -12,13 +12,17 @@ DeepSeek Harness 目前的消费方式是通过浏览器 UI 使用：`npx @deeps
 
 **外壳是独立于 pnpm workspace 的 `desktop/` 目录树。**它从不进入 `pnpm-workspace.yaml`，于是上游的锁文件、lint/hygiene/release 序列和打包门禁都不会触及它，也不会被它破坏不变量。它是独立的交付物，带自己的 `package.json`（仅 `@tauri-apps/cli`）和自己的 Rust crate。
 
-**Tauri v2 承载两个窗口。**主窗口加载零构建的静态 `ui/` 资源（本地管理面板：状态、更新菜单、设置、日志）。第二个 `WebviewWindow`（label 为 `harness`）加载 `http://127.0.0.1:<port>`——即 `dsh web` 服务——让 harness UI 在独立窗口运行。没有前端构建步骤；`frontendDist` 指向 `ui/`，`withGlobalTauri` 为面板的纯 JS 暴露 `window.__TAURI__.core` 桥。
+**Tauri v2 承载三个窗口。**主窗口加载零构建的静态 `ui/` 资源（本地管理面板：状态、更新菜单、设置、日志，以及「打开官方对话」按钮）。两个按需 `WebviewWindow` 由用户在面板里点击按钮拉起：`harness` 加载 `http://127.0.0.1:<port>`——即 `dsh web` 服务——让工作台在独立窗口运行；`official-chat` 加载 `https://chat.deepseek.com`，让 DeepSeek 官方对话在桌面上打开而不用离开外壳。重复点击任一按钮都会通过 `get_webview_window` + `set_focus` 复用既有窗口。没有前端构建步骤；`frontendDist` 指向 `ui/`，`withGlobalTauri` 为面板的纯 JS 暴露 `window.__TAURI__.core` 桥。
+
+**官方对话窗口以诚实的桌面版 Edge 身份运行，让 chat.deepseek.com 的环境检查把它当普通桌面浏览器。**`open_official_chat` 不再覆盖 user-agent：WebView2 引擎本身就是真实的桌面版 Edge，改写 UA 去声称 Chrome 会与不可覆盖的 `Sec-CH-UA` 客户端提示及原生 `navigator.userAgentData` 相矛盾——这种跨层不一致正是环境检测的特征。所有平台都调用 `.additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)`（仅 WebView2 后端消费该参数）：重述 wry 默认禁用项（`msWebOOUI`、`msPdfOOUI`、`msSmartScreenProtection`——自定义参数会整体替换默认值）并叠加 `AutomationControlled`、`TranslateUI`、`InterestFeedContentSuggestions` 与 `--disable-blink-features=AutomationControlled`。自定义参数要求专属 user-data 目录——WebView2 要求同一目录上的环境选项完全一致，而面板/工作台已在默认目录用默认选项建好环境——所以 builder 把 `.data_directory` 固定到 `<data_dir>/webview-official-chat`；`.incognito(true)` 保持会话干净。Tauri 2.11 builder 顺序仍是关键：属性调用必须早于每一个 `initialization_script` 且早于 `.build()`；三个初始化脚本按添加顺序运行——`pullstring-launcher.js`（先把真实 `window.__TAURI__` 捕获到闭包变量 `__DSH_TAURI_REF__`）→ `titlebar-pulse.js`（挂 chrome-row 顶部条带）→ `chat-fingerprint.js`（最后跑，把 `navigator.webdriver` 钉在 `false`，并彻底删除 `__TAURI__` / `__TAURI_INTERNALS__` / `__TAURI_METADATA__` / `__TAURI_IPC__`——正常浏览器里这些全局根本不存在，哪怕是拒绝调用的 neutered Proxy 也仍在宣告嵌入式身份）。拉绳挂件凭闭包里捕获的引用在全局删除后依然可用。命令改为 `async`，builder 结果通过 `std::sync::mpsc::channel` 回到 `tauri::async_runtime::spawn_blocking` 等待，IPC 调用者只在窗口真正注册后才 `Ok(())`。面板读取 `StatusView.official_chat_open`（2.5s 轮询），把同一按钮文案在「打开官方对话」与「关闭官方对话」之间切换；窗口已开时再次点击触发新增的 `close_official_chat` 命令（销毁已注册的 webview，或在未注册时返回「官方对话窗口未打开」错误）。
 
 **内核版本是钉在应用数据目录下的 npm 安装。**`fetch_releases` 通过 GitHub REST API 读取官方发布列表，API 被限流时回退到 releases Atom feed（tag 相同；回退仅丢失 prerelease 标记）。安装某版本执行 `npm install --prefix <app_data>/kernels/<version> @deepseek-ai/dsh@<version>`；活动版本是一个纯文本文件 `<app_data>/active.txt`。首次安装自动激活并自动启动；后续安装不动当前活动版本。因此"更新菜单替换内核"的方式是钉住另一版本并切换活动指针，而不是修补既有安装。
 
 **Node 来自环境、可配置。**外壳从设置、再到 PATH、再到常见安装位置解析 `node`，并按 dsh 的 engine 范围（`^22.19 || >=24`）校验；npm 依次从设置、`node` 同目录、PATH 解析。这让 POC 免于捆绑 Node sidecar。
 
 **发布是专用的 workflow。**`.github/workflows/desktop-release.yml` 用 `tauri-apps/tauri-action` 在 `macos-13`（Intel macOS，`.dmg`）与 `windows-latest`（`.exe`/NSIS）构建，由 `desktop-v*` tag 或手动触发，产出草稿 release 交给人工发布。
+
+**工作台与官方对话窗口共享同一套 chrome-row 顶部条带 + 拉绳挂件，按 origin 切换配色。**`titlebar-pulse.js` 与 `pullstring-launcher.js` 通过 `WebviewWindowBuilder::initialization_script` 注入到 `harness` 与 `official-chat` 两个 webview。两个脚本都按 `location.hostname` 选调色板与偏移：`chat.deepseek.com` → DeepSeek 官方蓝 `#4D6BFE`（rgb 77,107,254），拉绳贴 `left:12px`；其他（即 dsh web 工作台的 `127.0.0.1`）→ Gitea 绿 `#609926`，拉绳贴 `left:212px`（侧栏折叠按钮旁）。titlebar 脚本在页面自身不带 `<body><div data-titlebar-pulse="2">` 时（chat 不带）由 `ensureSecondBar()` 补出半周期偏移节点，保证两个 sweep 周期相同（6.01s）下两条带同时出现。两个脚本顶部都有 `if (window.top !== window.self) return` 顶帧守卫，避免 Tauri 在每个 iframe 都执行初始化脚本时挂出多份拉绳 / 条带。每个远程 origin 都有专属 capability（`harness-remote.json` / `official-chat-remote.json`），只授权 `allow-focus-main-shell`；URL 锁精确主机（`http://127.0.0.1:*` 与 `https://chat.deepseek.com/*`），不开 wildcard 域名。`harness` 窗口 `closable(false)` 防止误关丢内核会话；`official-chat` 不设——它不持有内核会话，OS chrome 关闭按钮必须正常工作。
 
 **内核子进程在退出时被回收。**Unix 上它以独立会话启动（`setsid`），停止时信号发给整个进程组；Windows 上用 `taskkill /T /F` 拆除整棵进程树。
 
@@ -32,7 +36,9 @@ DeepSeek Harness 目前的消费方式是通过浏览器 UI 使用：`npx @deeps
 
 ## 后果
 
-内核数据（会话、设置、profile）留在 dsh 自己的 `~/.dsh` home；只有外壳元数据（已装版本、活动指针、设置、日志）位于应用数据目录。GitHub REST 回退到 Atom 只在更新菜单里以警告形式可见。安装包未签名，因此 Windows SmartScreen 与 macOS Gatekeeper 会告警，直到加入代码签名。工作台窗口与管理面板是两个窗口；面板是管理内核的唯一入口，每次刷新状态都通过探测端口自动恢复陈旧状态。
+外壳承载三个 webview：本地静态管理面板（启动时唯一存在，是管理内核的唯一入口），以及由面板上对应按钮按需拉起的两个 `WebviewWindow`——`harness` 承载 `dsh web`，`official-chat` 承载 `https://chat.deepseek.com`。`official-chat` 窗口不持有内核会话，OS chrome 关闭按钮保持可用；`harness` 窗口设 `closable(false)` 防止误关丢会话，面板靠 `get_webview_window` + `set_focus` 按需重开。内核数据（会话、设置、profile）留在 dsh 自己的 `~/.dsh` home；只有外壳元数据（已装版本、活动指针、设置、日志）位于应用数据目录。GitHub REST 回退到 Atom 只在更新菜单里以警告形式可见。安装包未签名，因此 Windows SmartScreen 与 macOS Gatekeeper 会告警，直到加入代码签名。面板每次刷新状态都通过探测端口自动恢复陈旧状态。
+
+关闭管理面板会级联关闭 `official-chat` 窗口：它是面板驱动的瞬态窗口，不持有自己的生命周期，因此 `WindowEvent::CloseRequested` 处理路径（在内核停止提示之后）以及 `RunEvent::Exit` 回退路径都会通过 `get_webview_window("official-chat").destroy()` 销毁它。`harness` 工作台窗口刻意不参与级联——它的生命周期由 `stop_kernel` 绑定到内核子进程，目前没有把它与管理面板绑死的文档化信号，所以关闭面板（暂）不关闭工作台。
 
 ## 测试
 

@@ -1,28 +1,29 @@
 /**
- * Initialization script injected by `commands::open_harness` into the
- * dsh web workbench webview. It overrides the kernel's
- * `packages/client/web/src/base.css` titlebar styling so the desktop
- * shell owns the chrome-row pulse regardless of which kernel version
- * the workbench is running against.
+ * Initialization script injected into both `open_harness` (the dsh web
+ * workbench webview) and `open_official_chat` (the DeepSeek official chat
+ * webview). It owns the chrome-row sweep on every surface the shell opens
+ * so the pulse reads as shell chrome rather than workbench / vendor content.
  *
- * Why inject from the shell rather than wait for a kernel-side fix:
- * the kernel is a published npm artefact (`@deepseek-ai/dsh@<ver>`),
- * and a chrome-row decoration is shell chrome, not workbench content.
- * Letting the shell override keeps the workbench content surface
- * stable while the chrome evolves with the shell.
+ * Two surfaces, two palettes:
  *
- * The workbench intentionally diverges from the desktop shell panel on
- * two axes:
+ * - dsh web workbench (`http://127.0.0.1:<port>`): Gitea green (#609926,
+ *   rgb 96,152,38) so the workbench reads as a separate brand surface.
+ *   The workbench ships its own `body > [data-titlebar-pulse='2']` DOM
+ *   node, so the second sweep matches that pre-existing element.
  *
- * - colour: the Gitea brand green (#609926, rgb 96,152,38) — pure green,
- *   warmer than Tailwind's emerald-400 — so the user can read at a
- *   glance which surface the chrome belongs to (workbench = Gitea
- *   green; management panel = red whale eye).
- * - tempo: 6.01s period — ~22% faster than the shell panel's 7.68s —
- *   so the workbench pulse reads as a slightly more alert presence.
+ * - DeepSeek official chat (`https://chat.deepseek.com`): DeepSeek
+ *   official blue (#4D6BFE, rgb 77,107,254) so the chat window reads
+ *   as the official brand surface. The chat page does NOT ship the
+ *   second-sweep node, so this script appends it before applying the
+ *   styles — without that the half-cycle offset would have nothing to
+ *   match.
  *
- * Why the keyframe endpoints are computed from `getBoundingClientRect()`
- * and re-computed on `resize`: in WKWebView, `documentElement.clientWidth`
+ * Both surfaces stay on the same 6.01s period so the chrome-row sweep
+ * carries one rhythm across surfaces; the colors are the only
+ * differentiator, picked from `location.hostname` at injection time.
+ *
+ * The keyframe endpoints are computed from `getBoundingClientRect()` and
+ * re-computed on `resize`: in WKWebView, `documentElement.clientWidth`
  * returns physical pixels (e.g. 2560 on a 2x retina display), while CSS
  * layout and `transform` operate in CSS pixels (e.g. 1280). Hard-coding
  * endpoints from `clientWidth` therefore produces a transform range that
@@ -36,20 +37,63 @@
  * the display scale changes, so the band always travels exactly one
  * viewport-width plus one band-width.
  *
- * Loading order between this script and the workbench's own base.css
- * is not guaranteed, so every rule carries `!important` — the wrapper
- * script also appends the style node on `DOMContentLoaded` (or
- * immediately, if the document has already finished parsing) so the
- * injected sheet lives at the end of `<head>` and therefore wins
- * specificity ties even without `!important`. Belt and braces.
+ * Loading order between this script and the page's own stylesheets is
+ * not guaranteed, so every rule carries `!important` — the script also
+ * appends the style node on `DOMContentLoaded` (or immediately, if the
+ * document has already finished parsing) so the injected sheet lives at
+ * the end of `<head>` and therefore wins specificity ties even without
+ * `!important`. Belt and braces.
+ *
+ * Top-frame guard: Tauri runs initialization scripts in every frame, so
+ * without the guard an iframe inside chat.deepseek.com (login widgets,
+ * analytics) would mount its own copy of the bar and double-paint the
+ * sweep. The workbench page is a single document so the guard is a
+ * harmless no-op there.
  */
 (function () {
-  var STYLE_ID = "dsh-workbench-titlebar-pulse";
+  if (window.top !== window.self) {
+    return;
+  }
+
+  var STYLE_ID = "dsh-titlebar-pulse";
+
+  // Palette lookup by hostname. Anything other than the official chat
+  // gets the Gitea green (the dsh web workbench lives at 127.0.0.1).
+  var isOfficial = window.location.hostname === "chat.deepseek.com";
+  var PALETTE = isOfficial
+    ? {
+        rgb: "77, 107, 254",
+        hex: "#4D6BFE",
+        hover: "#7C92FF",
+      }
+    : {
+        rgb: "96, 152, 38",
+        hex: "#609926",
+        hover: "#7dbd45",
+      };
+  var HALO = "rgba(" + PALETTE.rgb + ", 0.45)";
 
   function cssViewportWidth() {
     return document.documentElement.getBoundingClientRect().width
       || document.documentElement.clientWidth
       || window.innerWidth;
+  }
+
+  function ensureSecondBar() {
+    // The dsh web workbench ships `body > [data-titlebar-pulse='2']` in
+    // its DOM; chat.deepseek.com (and any other remote page) does not.
+    // Append it here so the half-cycle second sweep has a node to ride,
+    // matching the workbench by structure rather than relying on the page
+    // to ship the DOM itself.
+    var existing = document.querySelector("body > [data-titlebar-pulse='2']");
+    if (existing) {
+      return existing;
+    }
+    var node = document.createElement("div");
+    node.setAttribute("data-titlebar-pulse", "2");
+    node.setAttribute("aria-hidden", "true");
+    document.body.appendChild(node);
+    return node;
   }
 
   function buildCss() {
@@ -61,8 +105,10 @@
     //   100% → band trailing edge one band-width past the right edge
     var startPx = -bandPx;
     var endPx = viewportPx + bandPx;
+    var gradient =
+      "linear-gradient(90deg, transparent 0%, " + HALO + " 15%, " + PALETTE.hex + " 50%, " + HALO + " 85%, transparent 100%)";
     return [
-      /* Hide the kernel's static brand band if it ever ships one. */
+      /* Hide a static brand band if the page ever ships one. */
       "body::before { content: none !important; display: none !important; }",
       /* First sweep — left to right across the chrome row. */
       "body::after {",
@@ -74,16 +120,17 @@
       "  width: " + bandPx + "px !important;",
       "  z-index: 1000 !important;",
       "  pointer-events: none !important;",
-      "  background: linear-gradient(90deg, transparent 0%, rgba(96, 152, 38, 0.55) 15%, #609926 50%, rgba(96, 152, 38, 0.55) 85%, transparent 100%) !important;",
+      "  background: " + gradient + " !important;",
       "  filter: blur(0.4px) !important;",
       "  border-radius: 999px !important;",
-      "  animation: dsh-workbench-titlebar-pulse-sweep 6.01s linear infinite !important;",
-      "  box-shadow: 0 0 8px rgba(96, 152, 38, 0.45) !important;",
+      "  animation: dsh-titlebar-pulse-sweep 6.01s linear infinite !important;",
+      "  box-shadow: 0 0 8px " + HALO + " !important;",
       "}",
       /* Second sweep — same width, half-cycle offset so the eye reads a
          continuous scan rather than a single dash crossing then dead
-         space. BootPage.installTitlebarPulse() injects the DOM node on
-         boot; this rule simply matches it. */
+         space. On the dsh web workbench this matches the node the page
+         ships; on chat.deepseek.com this matches the node ensureSecondBar
+         appended above. */
       "body > [data-titlebar-pulse='2'] {",
       "  position: fixed !important;",
       "  top: 0 !important;",
@@ -92,14 +139,14 @@
       "  width: " + bandPx + "px !important;",
       "  z-index: 1000 !important;",
       "  pointer-events: none !important;",
-      "  background: linear-gradient(90deg, transparent 0%, rgba(96, 152, 38, 0.55) 15%, #609926 50%, rgba(96, 152, 38, 0.55) 85%, transparent 100%) !important;",
+      "  background: " + gradient + " !important;",
       "  filter: blur(0.4px) !important;",
       "  border-radius: 999px !important;",
-      "  animation: dsh-workbench-titlebar-pulse-sweep 6.01s linear infinite !important;",
+      "  animation: dsh-titlebar-pulse-sweep 6.01s linear infinite !important;",
       "  animation-delay: 3.005s !important;",
-      "  box-shadow: 0 0 8px rgba(96, 152, 38, 0.45) !important;",
+      "  box-shadow: 0 0 8px " + HALO + " !important;",
       "}",
-      "@keyframes dsh-workbench-titlebar-pulse-sweep {",
+      "@keyframes dsh-titlebar-pulse-sweep {",
       "  0% { transform: translateX(" + startPx + "px); opacity: 1; }",
       "  100% { transform: translateX(" + endPx + "px); opacity: 1; }",
       "}",
@@ -107,6 +154,7 @@
   }
 
   function inject() {
+    ensureSecondBar();
     var existing = document.getElementById(STYLE_ID);
     if (existing) {
       // Recompute on resize: replace the sheet content so the keyframes

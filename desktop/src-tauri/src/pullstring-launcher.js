@@ -1,30 +1,74 @@
 /**
- * Initialization script injected by `commands::open_harness` into the
- * dsh web workbench webview, alongside `titlebar-pulse.js`. It renders a
- * small pull-string lamp floating at the top-left of the workbench; pulling
- * (clicking) the string lights the bulb and brings the shell's main
- * management window to the foreground via the `focus_main_shell` command.
+ * Initialization script injected into both `open_harness` (the dsh web
+ * workbench webview) and `open_official_chat` (the DeepSeek official chat
+ * webview). It renders a small pull-string lamp floating at the top-left
+ * of the page; pulling (clicking) the string lights the bulb and brings
+ * the shell's main management window to the foreground via the
+ * `focus_main_shell` command.
  *
- * Why inject from the shell rather than ship it in the kernel: the kernel
- * is a published npm artefact (`@deepseek-ai/dsh@<ver>`), and a shortcut
- * back to the shell's management panel is shell chrome, not workbench
- * content. Injecting from the shell keeps the widget present regardless of
- * which kernel version the workbench is running against.
+ * Why inject from the shell rather than ship it in the kernel: the
+ * kernel is a published npm artefact (`@deepseek-ai/dsh@<ver>`), and a
+ * shortcut back to the shell's management panel is shell chrome, not
+ * page content. The DeepSeek official chat is a third-party origin we
+ * cannot ship scripts into, so the same injection is the only path.
+ *
+ * Two surfaces, two anchors and palettes:
+ *
+ * - dsh web workbench: Gitea green cord (#609926) at left:212px, sized
+ *   to land beside the sidebar-collapse button (the comment near the
+ *   offset documents the geometry in detail).
+ *
+ * - DeepSeek official chat: DeepSeek blue cord (#4D6BFE) at left:12px,
+ *   hugging the chat's own top-left chrome — the chat page has no
+ *   sidebar, so the workbench's 212px offset would put the lamp in
+ *   empty space.
  *
  * The widget talks back to the shell over `window.__TAURI__.core.invoke`
- * (tauri.conf.json sets `withGlobalTauri: true`), so it needs no kernel-side
- * endpoint and works on any kernel version. Because the workbench page is a
- * remote origin (`http://127.0.0.1:<port>`), Tauri's ACL only lets this
- * invoke through because `permissions/focus-main-shell.json` exposes the
- * command and `capabilities/harness-remote.json` grants it to the `harness`
- * window on the loopback origin.
+ * (tauri.conf.json sets `withGlobalTauri: true`), so it needs no
+ * page-side endpoint. Because both webviews are remote origins
+ * (`http://127.0.0.1:<port>` and `https://chat.deepseek.com`),
+ * Tauri's ACL only lets this invoke through because
+ * `permissions/app-commands.json` exposes the command and the matching
+ * `capabilities/harness-remote.json` / `capabilities/official-chat-remote.json`
+ * grant it to the respective window on its origin.
  */
 (function () {
   // Tauri runs initialization scripts in every frame; the widget belongs to
-  // the top-level workbench document only.
+  // the top-level page only — without this guard an iframe inside chat
+  // would mount its own lamp and double-paint the icon on every nested
+  // document. The workbench page is a single document so the guard is a
+  // harmless no-op there.
   if (window.top !== window.self) {
     return;
   }
+
+  // Capture the real Tauri bridge ONCE at module top, BEFORE the
+  // `chat-fingerprint.js` initialization script (which loads after this
+  // file in the official-chat chain) overwrites `window.__TAURI__` with
+  // a neutered Proxy. The lamp still works because we keep this
+  // captured reference alive for the whole lifetime of the page. In the
+  // harness webview there is no `chat-fingerprint.js`, so this capture
+  // sees the real bridge on every load. Hoisted to the very top of the
+  // IIFE so `invokeFocusMainShell` (below) can read it via a name that
+  // does not depend on the live `window.__TAURI__` global — the lamp
+  // keeps raising the management window even after the fingerprint
+  // script neutered the bridge.
+  var __DSH_TAURI_REF__ = (typeof window.__TAURI__ !== "undefined") ? window.__TAURI__ : null;
+
+  // Surface selection by hostname: the dsh web workbench is a 127.0.0.1
+  // origin and so is anything else we might inject into; chat.deepseek.com
+  // is the only place the DeepSeek brand palette and the 12px offset apply.
+  var isOfficial = window.location.hostname === "chat.deepseek.com";
+  var PALETTE = isOfficial
+    ? {
+        cord: "#4D6BFE",
+        cordHover: "#7C92FF",
+      }
+    : {
+        cord: "#609926",
+        cordHover: "#7dbd45",
+      };
+  var LEFT_PX = isOfficial ? "12px" : "212px";
 
   var ROOT_ID = "dsh-shell-launcher";
   var STYLE_ID = "dsh-shell-launcher-style";
@@ -49,13 +93,13 @@
       "#" + ROOT_ID + " {",
       "  position: fixed;",
       "  top: 0;",
-      /* Hang next to the sidebar header toggle (right of the brand logo).
-         The offset is in CSS pixels, so display scaling and window zoom
-         scale it together with the sidebar it aligns to; plain window
-         resizes leave the fixed-width sidebar — and therefore the widget —
-         unmoved. 212px puts the bulb's center at ~230px, right beside the
-         sidebar-collapse button. */
-      "  left: 212px;",
+      /* Hang next to the chrome corner of the page: 212px on the dsh web
+         workbench (right of the brand logo, beside the sidebar-collapse
+         button), 12px on chat.deepseek.com (no sidebar, hug the page's
+         own top-left). Plain window resizes leave both anchors alone —
+         the workbench's sidebar is fixed-width and the chat has nothing
+         to align against. */
+      "  left: " + LEFT_PX + ";",
       "  z-index: 2147483647;",
       "  pointer-events: none;",
       "}",
@@ -77,10 +121,11 @@
       "  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);",
       "  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));",
       "}",
-      /* Gitea green (#609926), matching the workbench chrome-row pulse in
-         titlebar-pulse.js, so the string reads as workbench chrome. */
+      /* Cord color matches the surface brand (workbench green, official
+         chat blue) so the lamp reads as the same chrome surface as the
+         titlebar pulse running across the top of the viewport. */
       "#" + ROOT_ID + " .dsh-launcher-cord {",
-      "  stroke: #609926;",
+      "  stroke: " + PALETTE.cord + ";",
       "  stroke-width: 2;",
       "  stroke-linecap: round;",
       "}",
@@ -88,8 +133,8 @@
       "  fill: var(--dsh-launcher-base-fill);",
       "}",
       /* Palette variables, defaulting to the translucent whites that read
-         against the dark workbench palette; the light-mode override near
-         the end of the sheet swaps them. */
+         against the dark page palette; the light-mode override near the
+         end of the sheet swaps them. */
       "#" + ROOT_ID + " {",
       "  --dsh-launcher-base-fill: rgba(255, 255, 255, 0.42);",
       "  --dsh-launcher-bulb-fill: rgba(255, 255, 255, 0.14);",
@@ -111,15 +156,15 @@
       "  stroke-linecap: round;",
       "  transition: stroke 0.15s ease-out;",
       "}",
-      /* Hover: the string brightens (lighter Gitea green) to read as
-         grabbable. */
+      /* Hover: the cord brightens to a lighter shade of the surface brand
+         color to read as grabbable. */
       "#" + ROOT_ID + " .dsh-launcher-btn:hover .dsh-launcher-cord {",
-      "  stroke: #7dbd45;",
+      "  stroke: " + PALETTE.cordHover + ";",
       "}",
       "#" + ROOT_ID + " .dsh-launcher-btn:hover .dsh-launcher-bulb {",
       "  stroke: var(--dsh-launcher-bulb-hover-stroke);",
       "}",
-      /* Pulled: string + bulb travel down together, springing back on release. */
+      /* Pulled: cord + bulb travel down together, springing back on release. */
       "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-pulled svg {",
       "  transform: translateY(6px);",
       "}",
@@ -145,9 +190,12 @@
       "}",
       /* Light mode (the workbench marks dark with body[data-ds-dark-theme],
          written by boot-theme.ts before plugin load and kept by
-         ThemePresenter after): amber glass and darker linework keep the bulb
-         legible on the white workbench. Only the palette variables change,
-         so hover/lit precedence stays identical across themes. */
+         ThemePresenter after): amber glass and darker linework keep the
+         bulb legible on the white workbench. The chat page does not set
+         the attribute, so the rule still applies via :not — and it
+         happens to render fine on chat's white surfaces too. Only the
+         palette variables change, so hover/lit precedence stays
+         identical across themes. */
       "body:not([data-ds-dark-theme]) #" + ROOT_ID + " {",
       "  --dsh-launcher-base-fill: #78716c;",
       "  --dsh-launcher-bulb-fill: rgba(245, 158, 11, 0.24);",
@@ -167,14 +215,21 @@
   /**
    * Ask the shell to raise its management window next to the click.
    * `point` is the click's screen position (MouseEvent.screenX/Y, CSS
-   * pixels); the shell moves the panel near it so the user does not have
-   * to hunt for the window on another monitor. `onError` fires when the
-   * Tauri IPC is unavailable or the command rejects, so the caller can
-   * swap the warm glow for the red error flash.
+   * pixels); the shell moves the panel near it so the user does not
+   * have to hunt for the window on another monitor. `onError` fires
+   * when the Tauri IPC is unavailable or the command rejects, so the
+   * caller can swap the warm glow for the red error flash.
+   *
+   * Uses the hoisted `__DSH_TAURI_REF__` rather than reading the live
+   * `window.__TAURI__` — after `chat-fingerprint.js` runs (official-chat
+   * chain only) the global has been replaced with a neutered Proxy that
+   * rejects every `invoke`. The closure-captured reference still points
+   * at the real bridge installed by `withGlobalTauri: true`, so the
+   * lamp continues to raise the management window.
    */
   function invokeFocusMainShell(point, onError) {
     try {
-      var tauri = window.__TAURI__;
+      var tauri = __DSH_TAURI_REF__;
       if (tauri && tauri.core && typeof tauri.core.invoke === "function") {
         tauri.core
           .invoke("focus_main_shell", { x: Math.round(point.x), y: Math.round(point.y) })
@@ -183,7 +238,7 @@
             onError();
           });
       } else {
-        console.warn("dsh-desktop: window.__TAURI__ unavailable; focus_main_shell not sent");
+        console.warn("dsh-desktop: captured __TAURI__ unavailable; focus_main_shell not sent");
         onError();
       }
     } catch (err) {

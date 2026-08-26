@@ -112,6 +112,8 @@ pub fn run() {
             commands::start_kernel,
             commands::stop_kernel,
             commands::open_harness,
+            commands::open_official_chat,
+            commands::close_official_chat,
             commands::focus_main_shell,
             commands::plugin_status,
             commands::plugin_install,
@@ -128,7 +130,6 @@ pub fn run() {
             commands::skill_uninstall,
             commands::skill_set_enabled,
             commands::skill_check_updates,
-            commands::focus_main_shell,
             commands::confirm_close_shell,
         ])
         .build(tauri::generate_context!())
@@ -165,12 +166,34 @@ pub fn run() {
                 if let Some(window) = handle.get_webview_window("main") {
                     let _ = window.emit("request-quit-confirm", ());
                 }
+                // Cascade-close the official-chat panel-driven window: it does
+                // not own its own lifecycle, so closing the management panel
+                // implies closing it. Mirrored in the RunEvent::Exit branch
+                // below for the path where the panel closes without the
+                // kernel-running prompt intercepting (no kernel running, or
+                // close fired via OS shutdown / quit()). The harness workbench
+                // window is intentionally NOT cascaded here — its lifecycle is
+                // tied to the kernel child via stop_kernel, and the user may
+                // want the harness to outlive the management panel.
+                if let Some(oc) = handle.get_webview_window("official-chat") {
+                    let _ = oc.destroy();
+                }
             }
             // No kernel running, or not the main window: let the close
             // proceed. The Exit branch below still reaps any pid-file
             // leftover from an earlier shell crash.
         }
         if let tauri::RunEvent::Exit = event {
+            // Cascade-close the official-chat panel-driven window before the
+            // process exits. This is the fallback path for cases where the
+            // management panel closed without going through the
+            // kernel-running prompt (no kernel running, OS shutdown, or quit()
+            // fired from the UI). Same rationale as the WindowEvent handler
+            // above: official-chat is a transient panel-driven window and
+            // closing the panel implies closing it.
+            if let Some(oc) = handle.get_webview_window("official-chat") {
+                let _ = oc.destroy();
+            }
             if let Some(state) = handle.try_state::<AppState>() {
                 {
                     let mut guard = lock(&state.running);

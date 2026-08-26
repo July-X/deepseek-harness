@@ -854,6 +854,36 @@ button.danger.armed {
   font-weight: 600;
 }
 
+/* DeepSeek 官方蓝（#4D6BFE / rgb 77,107,254）：轻量边框 + 文字色，
+   与官方对话窗口的 chrome-row pulse / 拉绳颜色一致，让管理面板上的
+   按钮一眼能识别为「打开 DeepSeek 官方页面」。`ghost` 基底保证背景
+   透明不变，避免在 .btn-row 上抢色；hover 走 .btn-official-chat 自带的
+   色阶变亮即可。 */
+button.btn-official-chat {
+  border-color: rgba(77, 107, 254, 0.55);
+  color: #8aa1ff;
+}
+button.btn-official-chat:hover {
+  border-color: rgba(77, 107, 254, 0.85);
+  color: #b8c5ff;
+}
+/* Toggle-active state for the official-chat button: the dedicated
+   `official-chat` webview is open, so the next click will close it. The
+   border is intentionally a touch stronger than the default `.ghost`
+   tint (and uses the same DeepSeek-blue palette already loaded by the
+   window chrome), keeping the icon glyph untouched so the button reads
+   "close the existing chat" rather than picking a different visual
+   metaphor mid-flight. */
+button.btn-official-chat.official-chat-open {
+  border-color: rgba(77, 107, 254, 0.95);
+  color: #d6deff;
+  background: rgba(77, 107, 254, 0.14);
+}
+button.btn-official-chat.official-chat-open:hover {
+  border-color: rgba(77, 107, 254, 1);
+  color: #ffffff;
+}
+
 .toast {
   position: fixed;
   bottom: 24px;

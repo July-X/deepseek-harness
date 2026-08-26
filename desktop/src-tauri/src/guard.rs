@@ -130,12 +130,12 @@ fn watch_child(child: &mut Child, port: u16) -> WatchVerdict {
         if kernel::port_open(port) {
             return WatchVerdict::Ready;
         }
-        match child.try_wait() {
-            Ok(Some(status)) => return WatchVerdict::Exited(status),
-            // An OS-level wait error means the child state is unknowable;
-            // keep polling the port so a healthy boot still wins the race.
-            Ok(None) | Err(_) => {}
+        if let Ok(Some(status)) = child.try_wait() {
+            return WatchVerdict::Exited(status);
         }
+        // An OS-level wait error (the `Err` arm) means the child state is
+        // unknowable; keep polling the port so a healthy boot still wins
+        // the race.
         if Instant::now() >= deadline {
             let _ = kernel::stop(child);
             return WatchVerdict::Hung;
@@ -180,7 +180,10 @@ fn boot_once(
             WatchVerdict::Exited(status) => {
                 let _ = child.wait();
                 on_progress(&format!("内核进程在就绪前退出（{status}）"));
-                (BootVerdict::Failed(format!("内核进程在就绪前退出（{status}）")), None)
+                (
+                    BootVerdict::Failed(format!("内核进程在就绪前退出（{status}）")),
+                    None,
+                )
             }
             WatchVerdict::Hung => {
                 let _ = child.wait();
@@ -228,7 +231,11 @@ fn excerpt(lines: &[&str], idx: usize) -> String {
 ///
 /// Conservative by design: no candidate match yields an empty list, and the
 /// empty case routes to safe mode rather than blaming an arbitrary plugin.
-pub fn attribute(log_tail: &str, store_items: &[plugins::StoreItem], kernel_label: &str) -> Vec<Suspect> {
+pub fn attribute(
+    log_tail: &str,
+    store_items: &[plugins::StoreItem],
+    kernel_label: &str,
+) -> Vec<Suspect> {
     let lines: Vec<&str> = log_tail.lines().collect();
     let mut suspects: Vec<Suspect> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -444,10 +451,7 @@ pub fn guarded_start(
                     child2,
                 );
             }
-            trail.push(format!(
-                "停用疑似插件后仍失败：{}",
-                verdict2.reason()
-            ));
+            trail.push(format!("停用疑似插件后仍失败：{}", verdict2.reason()));
             suspects.extend(attribute(&log_tail(deps), &store_items, &kernel_label));
         } else {
             trail.push(String::from("写入隔离记录失败，跳过定向停用"));

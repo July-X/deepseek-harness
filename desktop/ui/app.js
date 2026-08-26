@@ -209,6 +209,15 @@ function renderStatus(view) {
 
   renderGuardBanner(view);
   syncWorkbenchButtons();
+  // The official-chat window is a toggled webview, not a one-shot button:
+  // its open/closed state lives in StatusView.official_chat_open, observed
+  // on the same 2.5s poll. Flip the label, swap the active border tint
+  // (`.official-chat-open`), and ride the shared busy guard so a click in
+  // flight never races the next status refresh.
+  const ocOpen = !!view.official_chat_open;
+  setText('btnOfficialChatLabel', ocOpen ? '关闭官方对话' : '打开官方对话');
+  $('btnOpenOfficialChat').classList.toggle('official-chat-open', ocOpen);
+  $('btnOpenOfficialChat').disabled = busyButtons.size > 0;
 }
 
 // 启动容错横幅：有被停用的插件，或上一次启动事故未恢复时保持可见；
@@ -717,6 +726,22 @@ function openHarnessWindow() {
   invoke('open_harness').catch((e) => toast('无法打开工作台窗口：' + e, 5000));
 }
 
+function openOfficialChatWindow() {
+  // The label flips between "打开官方对话" and "关闭官方对话" via
+  // renderStatus, which observes currentView.official_chat_open on every
+  // 2.5s status poll. One button drives both directions: when the window
+  // is already registered we close it; otherwise we open it.
+  if (currentView && currentView.official_chat_open) {
+    invoke('close_official_chat')
+      .then(() => refreshAll())
+      .catch((e) => toast('关闭官方对话窗口失败：' + e, 5000));
+    return;
+  }
+  invoke('open_official_chat')
+    .then(() => refreshAll())
+    .catch((e) => toast('无法打开官方对话窗口：' + e, 5000));
+}
+
 // --- logs modal -----------------------------------------------------------
 //
 // The modal lists every *.log file under <data_dir>/logs/ as a tab. The
@@ -890,6 +915,7 @@ $('btnToggle').addEventListener('click', () => {
   }
 });
 $('btnOpenWindow').addEventListener('click', openHarnessWindow);
+$('btnOpenOfficialChat').addEventListener('click', openOfficialChatWindow);
 $('btnLogs').addEventListener('click', showLogs);
 $('btnLogClose').addEventListener('click', hideLogs);
 $('btnLogRefresh').addEventListener('click', () => loadActiveLog());

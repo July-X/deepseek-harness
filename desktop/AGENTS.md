@@ -43,6 +43,29 @@ UI 是零构建静态页面（`ui/index.html` + `app.js` + `styles.css`），改
 - 版本发布由 `.github/workflows/desktop-release.yml` 负责（tag `desktop-v<version>` 触发，且只接受 develop 上的 commit——tag 指向其他分支或 dispatch 选其他 ref 都会在 verify 步失败）；发版前同步 `package.json` 与 `tauri.conf.json` 的 `version`。workflow 用 `TAURI_SIGNING_PRIVATE_KEY` secret 给更新制品签名，与 `tauri.conf.json` 钉死的 updater pubkey 配对——轮换密钥时两者必须一起换。**`releaseDraft` 与 `prerelease` 字段都 hardcode 为 `false`**。
 - 外壳自更新走 `tauri-plugin-updater`（见 `src/updater.rs`）：endpoint 解析 `/releases/latest/download/latest.json`，所以发布版本必须不是 draft、不是 prerelease，否则 updater 拿到 404 时 `updater::check()` 把 `ReleaseNotFound` 当 empty state 处理（UI 显示"已是最新"），看起来像是"没有更新"，实际是 endpoint 路径错了。
 
+## 工具调用与沙箱
+
+DSH 把工具调用与文件策略解耦：`runtime-context` 的「Current DSH file policy」给出当前会话的 `sandbox_permissions`（`workspace-write` / `danger-full-access`），agent 必须据此调用 `fs.edit / fs.write / pwsh` 等工具。误传 `sandbox_permissions` 是当前唯一常见的「沙箱升级失败」根因。
+
+**禁止同模式重声明 sandbox_permissions。** `fs.edit / fs.write / pwsh` 等工具调用里若带 `sandbox_permissions` 字段，其值必须**严格大于** `runtime-context` 给出的当前模式；与当前模式相同或更窄都会触发 `sandbox escalation to "<mode>" is not strictly wider than this call's current "<mode>" mode` 错误。出现频率最高的触发场景：
+
+- 当前模式已是 `danger-full-access`，但工具调用仍显式写 `sandbox_permissions: "danger-full-access"` —— 这种「重声明」会被工具拒绝。
+- 当前模式是 `workspace-write`，却传了 `sandbox_permissions: "workspace-write"` —— 同样被拒。
+
+**正确做法：**
+
+1. 默认情况下，`fs.edit / fs.write / pwsh` 调用**不要**传 `sandbox_permissions` 字段；当前 `runtime-context` 的模式就是工具的实际权限，无需重复声明。
+2. 只有当调用需要的模式严格大于 `runtime-context` 当前模式（例如当前是 `workspace-write`，但本步要写工作区之外的文件）时，才显式传更高级别，并附带一句非空 `justification`（即 `sandbox_permissions` 升级理由），由当前会话的审批策略决定是否放行。
+3. 在 `runtime-context` 标注「Approval prompts are disabled」的会话里，**禁止**任何 `sandbox_permissions` 重声明（含更高级别）；只有完全省略字段的调用才会通过。原因是沙箱把这种显式重声明视为升级请求，而禁用审批的会话无法放行任何升级请求。
+
+**工具实现层的硬性检查（agent 自己实现工具时也要遵守）：** `fs.edit / fs.write / pwsh` 等工具在解析完请求后，应自行吞掉同级别 `sandbox_permissions`：
+
+- 若传入的 `sandbox_permissions` 与当前模式相同，silent pass（视作未传），不要向调用方报错。
+- 只有当传入的 `sandbox_permissions` 严格大于当前模式，才走升级路径并校验 `justification` 非空。
+- `justification` 缺失或仅含空白字符时，必须报错并说明「同/更高级别 sandbox_permissions 重声明时省略字段；更高级别必须附一句非空 justification」。
+
+这样同级别重声明永远是 silent pass，会话里就不会再出现那条错误。
+
 ## 已知坑
 
 速查表见 [docs/troubleshooting.md](docs/troubleshooting.md)。
