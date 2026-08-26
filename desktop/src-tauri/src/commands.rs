@@ -814,42 +814,30 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
             let result: Result<(), String> = (|| {
                 let window = WindowBuilder::new(&handle, OFFICIAL_CHAT_WINDOW_LABEL)
                     .title("DeepSeek 官方对话")
-                    .inner_size(1280.0, 840.0)
+                    .inner_size(1366.0, 768.0)
                     .resizable(true)
                     .build()
                     .map_err(|e| format!("无法创建官方对话窗口：{e}"))?;
                 let _ = fs::create_dir_all(&profile_dir);
                 let scale = window.scale_factor().unwrap_or(1.0);
                 // inner_size() can read 0 before the window is shown on some
-                // backends; fall back to the requested 1280x840 logical so the
+                // backends; fall back to the requested 1366x768 logical so the
                 // content webviews get a sane initial size before the first
                 // Resized event relayouts with the real geometry.
                 let phys = window.inner_size().unwrap_or_default();
                 let mut w = phys.width as f64 / scale;
                 let mut h = phys.height as f64 / scale;
                 if w <= 0.0 || h <= 0.0 {
-                    w = 1280.0;
-                    h = 840.0;
+                    w = 1366.0;
+                    h = 768.0;
                 }
                 let content_h = (h - OFFICIAL_CHAT_STRIP_HEIGHT).max(0.0);
 
-                // Tab strip: local SPA route renders the tab bar and keeps
-                // window.__TAURI__ (chat-fingerprint.js is NOT injected
-                // here) so it can invoke the tab commands.
-                let strip_builder = WebviewBuilder::new(
-                    OFFICIAL_CHAT_STRIP_LABEL,
-                    WebviewUrl::App("index.html?chatstrip=1".into()),
-                );
-                window
-                    .add_child(
-                        strip_builder,
-                        LogicalPosition::new(0.0, 0.0),
-                        LogicalSize::new(w, OFFICIAL_CHAT_STRIP_HEIGHT),
-                    )
-                    .map_err(|e| format!("无法创建官方对话页签栏：{e}"))?;
-
                 // One content webview per tab. Only the first is visible on
-                // open; switch_official_chat_tab toggles the rest.
+                // open; switch_official_chat_tab toggles the rest. wry creates
+                // every child webview full-window (initWithFrame: the parent
+                // view on macOS) and the last-created sits on top, so the strip
+                // is built LAST to stay above the content even before relayout.
                 for (i, tab) in OFFICIAL_CHAT_TABS.iter().enumerate() {
                     let label = format!("official-chat-tab-{i}");
                     let url = Url::parse(tab.1).map_err(|e| format!("非法页签地址：{e}"))?;
@@ -876,6 +864,22 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
                     }
                 }
 
+                // Tab strip: local SPA route renders the tab bar and keeps
+                // window.__TAURI__ (chat-fingerprint.js is NOT injected
+                // here) so it can invoke the tab commands. Built last so it
+                // is the topmost child webview.
+                let strip_builder = WebviewBuilder::new(
+                    OFFICIAL_CHAT_STRIP_LABEL,
+                    WebviewUrl::App("index.html?chatstrip=1".into()),
+                );
+                window
+                    .add_child(
+                        strip_builder,
+                        LogicalPosition::new(0.0, 0.0),
+                        LogicalSize::new(w, OFFICIAL_CHAT_STRIP_HEIGHT),
+                    )
+                    .map_err(|e| format!("无法创建官方对话页签栏：{e}"))?;
+
                 // Keep the strip pinned to the top and content filling
                 // below on every resize and scale-factor change.
                 let app_for_layout = handle.clone();
@@ -887,6 +891,16 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
                         relayout_official_chat(&app_for_layout);
                     }
                 });
+
+                // wry's macOS backend ignores the add_child position/size at
+                // creation (initWithFrame: parent = full window), so the strip
+                // and every content webview start full-window and overlap until
+                // a resize. Schedule one relayout on the main thread right after
+                // creation so set_position/set_size actually pin the strip to the
+                // top and push content below it — otherwise the strip stays
+                // covered until the user resizes the window.
+                let app_for_init = handle.clone();
+                let _ = window.run_on_main_thread(move || relayout_official_chat(&app_for_init));
                 Ok(())
             })();
             if let Err(ref e) = result {
