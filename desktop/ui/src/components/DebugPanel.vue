@@ -2,8 +2,10 @@
 // dev 调试浮按钮 + 弹层。
 //
 // 仅在 dev 构建（body.dev-build）下渲染，提供「在 dev 里临时启用 release 版 CSS 钩子」的预览入口：
-//   - 勾选「预览 release 顶部绿渐变」会把 rel-build 类挂到 body 上，复用 theme.css:150 那条
-//     body.rel-build::before 规则，让 dev 期即可看到 64px 绿色渐变带。
+//   - 勾选「预览 release 顶部绿渐变」会把 rel-build 类挂到 body 上，复用 theme.css
+//     那条 body.rel-build 背景渐变规则（sidebar 在 release 期透明、让 body 的绿
+//     贯穿整窗），让 dev 期即可看到 release 版的顶部 50% 绿色背景渐变（背景层、
+//     不糊内容、整窗一片连贯）。
 //   - 真正的状态变更走 store.setReleasePreview()，非 dev 构建会被拒绝（不污染正式版）。
 //   - 弹层内同时列出 release-only 的 CSS 钩子与代码位置，方便对照调试。
 //
@@ -80,11 +82,12 @@ function close() {
             <span>预览 release 顶部绿渐变</span>
           </label>
           <small class="debug-meta">
-            <code>body.rel-build::before</code>
-            · linear-gradient rgba(96, 153, 38, 0.20 → 0)
+            <code>body.rel-build</code>（sidebar 透明）
+            · linear-gradient rgba(96, 153, 38, 0.25 → 0) @ 50%
             · Gitea brand 绿 <code>--gitea-green #609926</code>
-            · height 64px
-            · 幅度与 dev 构建鲸眼红 (20%) 对齐
+            · 单一底色：绿只画在 body，sidebar release 期透明，整窗一片连贯不分段
+            · 背景层（非覆盖层）：内容画在渐变之上，不糊
+            · 幅度与 dev 构建鲸眼红 (25%) 对齐
           </small>
         </li>
       </ul>
@@ -92,8 +95,8 @@ function close() {
       <h4>release-only 钩子清单</h4>
       <ul class="debug-hooks">
         <li>
-          <code>theme.css:150</code>
-          <span>body.rel-build::before — 顶 64px 绿渐变</span>
+          <code>theme.css:171</code>
+          <span>body.rel-build — 绿只画 body；sidebar 透明 → 整窗一片连贯</span>
         </li>
         <li>
           <code>store.js:applyBuildClass</code>

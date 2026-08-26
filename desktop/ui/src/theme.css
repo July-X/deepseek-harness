@@ -143,30 +143,44 @@ code {
   border-right: 1px solid var(--border);
 }
 
-/* dev 构建（tauri dev）给侧栏顶部洗一层鲸眼红，与正式壳一眼可辨。 */
+/* dev 构建（tauri dev）：自侧栏顶部（品牌区）向下铺一层鲸眼红淡出渐变，与正式壳
+   一眼可辨。渐变是 .sidebar 的背景层（非覆盖层）——内容（品牌/菜单）画在渐变之上，
+   不会被「糊一层」。覆盖侧栏顶部 50% 高度——顶端 α=0.25，线性淡出至 50% 窗高处
+   归 0（50% 以下回归纯 --bg-soft 底，不留拖尾）；幅度与 release 构建的 Gitea 绿
+   背景渐变对齐，保留对称关系。 */
 body.dev-build .sidebar {
-  background-image: linear-gradient(to bottom, rgba(255, 45, 48, 0.20), rgba(255, 45, 48, 0));
+  background-image: linear-gradient(
+    to bottom,
+    rgba(255, 45, 48, 0.25) 0%,
+    rgba(255, 45, 48, 0) 50%
+  );
 }
 
-/* release 构建：窗口顶部（OS 标题栏正下方、鲸眼脉冲轨道那一条）洗一层
-   Gitea brand 绿（--gitea-green #609926）的淡出渐变，常亮标识「这是正式版」。
-   渐变幅度与 dev 构建的鲸眼红对齐（顶端 20% → 完全透明），保留对称关系。
-   fixed + pointer-events:none 叠在品牌区上方，不挡点击；rel-build 由首个状态帧
-   落下后设置（store.js:applyBuildClass）。dev 调试面板可临时覆盖该类以便在
-   dev 期预览——见 DebugPanel.vue 的 setReleasePreview()。 */
-body.rel-build::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 64px;
-  pointer-events: none;
-  background: linear-gradient(
+/* release 构建：自窗口顶部向下铺一层 Gitea brand 绿（--gitea-green #609926）的
+   淡出渐变，常亮标识「这是正式版」。作为「背景」而非覆盖层，且只画在 body 一层
+   上——绿渐变是 body 的 background-image，#app/.layout/main 均透明，能一路透出
+   到整窗。关键在「单一底色」：若 sidebar 仍留自身的 --bg-soft（比 body 的 --bg
+   浅），同一片绿叠两种底色会合成出两段不同的绿、被侧栏/主区边界切成两块，失去
+   整体感；故 release 期 sidebar 去掉自身填充（见下条规则），与 body 共用同一底
+   色，绿叠同一底色即一片连贯地贯穿侧栏→主区。内容（卡片/菜单/文案）一律画在渐
+   变之上，不糊。body 不滚动（overflow:hidden），渐变天然钉在视口顶部。覆盖整窗
+   顶部 50% 高度——顶端 α=0.25，线性淡出至 50% 窗高处归 0；幅度与 dev 构建的鲸
+   眼红侧栏渐变对齐，保留对称关系。rel-build 由首个状态帧落下后设置
+   （store.js:applyBuildClass）；dev 调试面板可临时覆盖该类以便在 dev 期预览——
+   见 DebugPanel.vue 的 setReleasePreview()。 */
+body.rel-build {
+  background-image: linear-gradient(
     to bottom,
-    rgba(96, 153, 38, 0.20),
-    rgba(96, 153, 38, 0)
+    rgba(96, 153, 38, 0.25) 0%,
+    rgba(96, 153, 38, 0) 50%
   );
+}
+
+/* release 期侧栏去掉 --bg-soft 填充、改透明，让 body 那片绿贯穿侧栏→主区不
+   分段（同一底色 = 同一合成结果 = 一个整体）；侧栏与主区的结构分隔仍由
+   border-right 承担。dev 构建不受影响——仍保留 --bg-soft + 鲸眼红。 */
+body.rel-build .sidebar {
+  background: transparent;
 }
 
 .brand {
