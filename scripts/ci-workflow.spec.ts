@@ -481,49 +481,6 @@ describe('npm release workflows', () => {
   })
 })
 
-describe('Desktop release workflow', () => {
-  it('builds the two supported targets on live runners and verifies the tag version', () => {
-    const workflow = loadWorkflow('.github/workflows/desktop-release.yml')
-    const build = workflowJob(workflow, 'build')
-    if (!isRecord(workflow.on) || !Array.isArray(build.steps)) {
-      throw new TypeError('Desktop release must define on and build steps')
-    }
-
-    // Tag-triggered plus manual dispatch; never a pull_request check.
-    expect(Object.keys(workflow.on).sort()).toEqual(['push', 'workflow_dispatch'])
-    expect(workflow.on.push).toMatchObject({ tags: ['desktop-v*'] })
-
-    // macos-13 is retired; macos-15-intel is the last x86_64 macOS runner.
-    if (!isRecord(build.strategy) || !isRecord(build.strategy.matrix) || !Array.isArray(build.strategy.matrix.include)) {
-      throw new TypeError('Desktop release must define a matrix include list')
-    }
-    const platforms = build.strategy.matrix.include.map((entry: unknown) => (isRecord(entry) ? entry.platform : null))
-    expect(platforms).toEqual(['macos-15-intel', 'windows-latest'])
-
-    const steps = build.steps.filter(isRecord)
-    // The tag must name the version in tauri.conf.json/package.json before any build.
-    expect(JSON.stringify(steps[1])).toContain('desktop-v$($conf.version)')
-    // Releases ship only from develop: tags must name a commit reachable from
-    // origin/develop and dispatches must select the develop ref.
-    expect(JSON.stringify(steps[1])).toContain('is-ancestor HEAD FETCH_HEAD')
-    expect(JSON.stringify(steps[1])).toContain("GITHUB_REF_NAME -ne 'develop'")
-    // desktop/ sits outside the pnpm workspace; install must not walk up to the root.
-    expect(JSON.stringify(steps)).toContain('pnpm install --ignore-workspace')
-    expect(JSON.stringify(steps)).toContain('tauri-apps/tauri-action@v1')
-
-    // The in-app updater works only when the workflow signs the updater
-    // artifacts AND the bundle config pins the pubkey + latest.json endpoint.
-    expect(JSON.stringify(steps)).toContain('TAURI_SIGNING_PRIVATE_KEY')
-    const conf: unknown = JSON.parse(readFileSync(resolve(root, 'desktop/src-tauri/tauri.conf.json'), 'utf8'))
-    if (!isRecord(conf) || !isRecord(conf.bundle) || !isRecord(conf.plugins) || !isRecord(conf.plugins.updater)) {
-      throw new TypeError('tauri.conf.json must define bundle and plugins.updater')
-    }
-    expect(conf.bundle.createUpdaterArtifacts).toBe(true)
-    expect(String(conf.plugins.updater.pubkey)).not.toHaveLength(0)
-    expect(JSON.stringify(conf.plugins.updater.endpoints)).toContain('releases/latest/download/latest.json')
-  })
-})
-
 describe('Documentation site publication', () => {
   it('keeps Pages deployment dispatch-only from a dsh-v* tag', () => {
     const workflow = loadWorkflow('.github/workflows/docs-pages.yml')

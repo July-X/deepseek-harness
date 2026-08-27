@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/archived/bug-fix/2026-09-01-desktop-direct-git-tar-merged-path.md
+2026-09-01-desktop-direct-git-tar-merged-path.md: 267886d39b1af18e490703981be33e03ec3b5e81
+2026-09-01-desktop-direct-git-tar-merged-path.zh.md: e9471dbc69535e41e26ca57713c981b8cab8eb6b

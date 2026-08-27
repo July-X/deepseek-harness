@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (.agents/notes/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/archived/architecture/2026-08-22-desktop-npm-registry-default-and-override.md
+2026-08-22-desktop-npm-registry-default-and-override.md: 49bbcef80aea6e7e6dee151d6296b8f81924c4dd
+2026-08-22-desktop-npm-registry-default-and-override.zh.md: e1ff71d812e7f665cffb0d6028666cb79a69119c

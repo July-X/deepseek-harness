@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-11-08-desktop-nvm-node-detection.md
-2026-11-08-desktop-nvm-node-detection.md: c2e9856473500c4f5bbfea0eecbaa2dbbfb68969
-2026-11-08-desktop-nvm-node-detection.zh.md: 2e33ac21b6e1a1ef27762914b2b831b5c4864a85

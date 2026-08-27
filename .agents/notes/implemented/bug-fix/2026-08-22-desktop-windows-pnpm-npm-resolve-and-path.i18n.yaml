@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (.agents/notes/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-22-desktop-windows-pnpm-npm-resolve-and-path.md
-2026-08-22-desktop-windows-pnpm-npm-resolve-and-path.md: 59006d7d31dc1731efb187fa65d9827601cf5538
-2026-08-22-desktop-windows-pnpm-npm-resolve-and-path.zh.md: 3637b958e1eae075d6bcc0bb29b426b43ff41dd0

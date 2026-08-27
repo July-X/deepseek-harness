@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-23-workbench-titlebar-pulse-dead-time.md
-2026-08-23-workbench-titlebar-pulse-dead-time.md: e656acdf030485df8d1e49b219d73b1a03950464
-2026-08-23-workbench-titlebar-pulse-dead-time.zh.md: 888cf33c933a6b78a59a20cf2a17eb12e831aff9

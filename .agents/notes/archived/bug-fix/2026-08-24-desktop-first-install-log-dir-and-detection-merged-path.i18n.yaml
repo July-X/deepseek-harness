@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/archived/bug-fix/2026-08-24-desktop-first-install-log-dir-and-detection-merged-path.md
+2026-08-24-desktop-first-install-log-dir-and-detection-merged-path.md: 4df019eaf9b8f46ff8e4d6782e6f2b384ae780a1
+2026-08-24-desktop-first-install-log-dir-and-detection-merged-path.zh.md: d32a03c6270dc9e279bc7d4dd26f3fb9d9c2f5f6

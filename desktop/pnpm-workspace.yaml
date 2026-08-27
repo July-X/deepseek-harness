@@ -1,7 +1,0 @@
-# desktop 是独立交付物，不加入仓库根 workspace（见 AGENTS.md「范围」）。
-# 本文件让 pnpm 把 desktop/ 当作独立根：根 pnpm-workspace.yaml 的
-# allowBuilds 白名单不会随 --ignore-workspace 传导到这里，而 pnpm 10+
-# 默认拒绝依赖的安装脚本（strictDepBuilds），所以 esbuild（Vite 依赖的
-# 原生二进制）必须在本目录内单独放行。
-allowBuilds:
-  esbuild: true
