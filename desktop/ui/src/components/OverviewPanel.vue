@@ -196,7 +196,7 @@ function goVersions() {
         <el-button
           text
           :icon="ChatDotRound"
-          :class="{ 'official-chat-open': officialChatOpen }"
+          :class="{ 'official-chat-open': officialChatOpen, 'official-chat-closed': !officialChatOpen }"
           :disabled="store.starting || globalBusy"
           :loading="isLoading('officialChat')"
           title="打开或关闭 DeepSeek 官方对话"
