@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.1.1-rc.6",
+  "version": "0.1.1-rc.7",
   "private": true,
   "description": "DeepSeek Harness 桌面外壳：内嵌管理面板 + 内核版本管理与更新",
   "type": "module",
@@ -10,6 +10,7 @@
     "dev:ui": "vite",
     "build": "tauri build",
     "build:ui": "vite build",
+    "test:ui": "node --test ui/test/officialChatTabs.test.js",
     "build:mac-intel": "tauri build --target x86_64-apple-darwin",
     "build:win": "tauri build --target x86_64-pc-windows-msvc"
   },
