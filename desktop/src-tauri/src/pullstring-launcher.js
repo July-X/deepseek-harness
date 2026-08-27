@@ -78,22 +78,31 @@
   // 无需水平翻转图形。
   var SIDE = isOfficial ? "right" : "left";
   var EDGE_PX = isOfficial ? "12px" : "212px";
+  // 两种 variant：官方对话 strip 用 24x38 的紧凑小台灯（不撑高 strip），
+  // dsh 工作台用 24x66 的传统拉绳灯（cord 38px + 螺丝底座 + 大灯泡 + 灯丝），
+  // 跟它们各自窗口的视觉语义匹配。
+  var LAMP_VARIANT = isOfficial ? "desk" : "pull-string";
+  // 两种 variant 的 pull 反馈幅度不一样：紧凑台灯只有 3px 才有
+  // 比例感；老拉绳灯用 6px 看起来更"按下去"。
+  var PULL_TRANSLATE_PX = LAMP_VARIANT === "desk" ? "3px" : "6px";
   // Both surfaces the lamp lives on have enough vertical room for the
-  // 38px compact SVG: the dsh web workbench is a full-window webview
-  // (no top clip), and the official-chat strip is its natural 38px
-  // tab-bar height (the SVG is sized to fit it exactly). `top: 0`
-  // therefore anchors the lamp at the top edge of the viewport in both
-  // surfaces, reading as a small desk lamp sitting on the chrome.
+  // active variant's SVG: the dsh web workbench is a full-window
+  // webview (no top clip), and the official-chat strip is its natural
+  // 38px tab-bar height (the compact 24x38 desk-lamp fits exactly).
+  // `top: 0` anchors the cord at the top edge of the viewport in
+  // both cases — long pull-string cord (pull-string variant) or the
+  // short pull-chain (desk variant) — reading as the lamp hanging
+  // from the chrome.
   var TOP_PX = "0px";
 
   var ROOT_ID = "dsh-shell-launcher";
   var STYLE_ID = "dsh-shell-launcher-style";
-  // Small desk-lamp SVG that fits inside the 38px-tall official-chat
-  // strip. The original pull-string lamp (66px tall) had to live in a
-  // 66px-tall HWND; this compact rewrite (24x38) reads as a small
-  // desk lamp — short pull chain hanging from the top, conical shade,
-  // tiny bulb peeking out under the shade, thin stem, rounded base.
-  var SVG = [
+  // Two SVGs — the variant decides which one is mounted.
+  // .dsh-launcher-shade / .dsh-launcher-stem are desk-only, and
+  // .dsh-launcher-filament is pull-string-only; the buildCss below only
+  // emits the rules that actually match the active SVG, so we never
+  // ship a CSS selector for an element that isn't in the DOM.
+  var SVG_DESK = [
     '<svg viewBox="0 0 24 38" width="24" height="38" aria-hidden="true">',
     /* Pull chain (short, from the top of the strip down to the shade). */
     '<line class="dsh-launcher-cord" x1="12" y1="2" x2="12" y2="5"/>',
@@ -107,22 +116,37 @@
     '<rect class="dsh-launcher-base" x="3" y="30" width="18" height="6" rx="1.5"/>',
     "</svg>",
   ].join("");
+  // The original 66px pull-string lamp — long cord hanging from the
+  // top edge, screw base, large bulb with a visible filament zigzag
+  // inside. Reads as a classic Edison-bulb pull-string on the workbench,
+  // where the 66px height has no constraint.
+  var SVG_PULL = [
+    '<svg viewBox="0 0 24 66" width="24" height="66" aria-hidden="true">',
+    /* The string, hanging from the top edge of the viewport. */
+    '<line class="dsh-launcher-cord" x1="12" y1="0" x2="12" y2="38"/>',
+    /* Screw base where the string meets the bulb. */
+    '<rect class="dsh-launcher-base" x="8.5" y="37" width="7" height="7" rx="1.5"/>',
+    /* Bulb glass. */
+    '<circle class="dsh-launcher-bulb" cx="12" cy="54" r="9.5"/>',
+    /* Filament, visible when lit. */
+    '<path class="dsh-launcher-filament" d="M9 52 q1.5 3 3 0 q1.5 -3 3 0" fill="none"/>',
+    "</svg>",
+  ].join("");
+  var SVG = LAMP_VARIANT === "desk" ? SVG_DESK : SVG_PULL;
 
   function buildCss() {
-    return [
+    var rules = [
       "#" + ROOT_ID + " {",
       "  position: fixed;",
       "  top: " + TOP_PX + ";",
-      /* Hang at the chrome corner of the page: left:212px on the dsh web
-         workbench (right of the brand logo, beside the sidebar-collapse
-         button), right:12px on the official-chat strip (the strip has
-         nothing on its right side, so 12px from the edge reads as
-         "flush right"). Plain window resizes leave both anchors alone —
-         the workbench's sidebar is fixed-width and the strip is its
-         natural 38px tab-bar height, both wide enough that the lamp
-         has clearance. `top` is `0` on both surfaces because the
-         compact 38px desk-lamp fits in the strip HWND without
-         clipping. */
+      /* Anchor on the chrome corner. dsh web workbench hangs the lamp on
+         the right of the brand logo (left:212px); the official-chat
+         strip mirrors it to the right edge (right:12px). Plain window
+         resizes leave both anchors alone — the workbench sidebar is
+         fixed-width and the strip is its natural 38px tab-bar height;
+         each variant's SVG is sized to fit (24x38 desk for the strip,
+         24x66 pull-string for the full workbench). `top` is `0` on
+         both surfaces so the cord anchors at the top of the viewport. */
       "  " + SIDE + ": " + EDGE_PX + ";",
       "  z-index: 2147483647;",
       "  pointer-events: none;",
@@ -157,23 +181,6 @@
       "  fill: var(--dsh-launcher-base-fill);",
       "  transition: fill 0.18s ease;",
       "}",
-      /* Conical shade of the desk lamp: same translucent glass as the
-         bulb, with a thin lighter linework to read as a defined shape
-         against the dark strip. */
-      "#" + ROOT_ID + " .dsh-launcher-shade {",
-      "  fill: rgba(255, 255, 255, 0.18);",
-      "  stroke: rgba(255, 255, 255, 0.55);",
-      "  stroke-width: 0.8;",
-      "  stroke-linejoin: round;",
-      "  transition: fill 0.18s ease, stroke 0.18s ease, stroke-width 0.18s ease;",
-      "}",
-      /* Stem is a single 1px line connecting the shade to the base. */
-      "#" + ROOT_ID + " .dsh-launcher-stem {",
-      "  stroke: rgba(255, 255, 255, 0.55);",
-      "  stroke-width: 1;",
-      "  stroke-linecap: round;",
-      "  transition: stroke 0.18s ease, stroke-width 0.18s ease;",
-      "}",
       /* Palette variables, defaulting to the translucent whites that read
          against the dark page palette; the light-mode override near the
          end of the sheet swaps them. */
@@ -181,6 +188,7 @@
       "  --dsh-launcher-base-fill: rgba(255, 255, 255, 0.42);",
       "  --dsh-launcher-bulb-fill: rgba(255, 255, 255, 0.14);",
       "  --dsh-launcher-bulb-stroke: rgba(255, 255, 255, 0.55);",
+      "  --dsh-launcher-filament-stroke: rgba(255, 255, 255, 0.35);",
       "  --dsh-launcher-lit-fill: #ffd45e;",
       "  --dsh-launcher-lit-stroke: #ffdf8a;",
       "}",
@@ -190,46 +198,110 @@
       "  stroke-width: 0.8;",
       "  transition: fill 0.18s ease-out, stroke 0.18s ease-out, stroke-width 0.18s ease-out;",
       "}",
+    ];
 
+    // Variant-specific selectors that don't exist on the other variant's
+    // SVG (filament is pull-string only, shade+stem are desk only).
+    if (LAMP_VARIANT === "pull-string") {
+      rules.push(
+        "#" + ROOT_ID + " .dsh-launcher-filament {",
+        "  stroke: var(--dsh-launcher-filament-stroke);",
+        "  stroke-width: 1.2;",
+        "  stroke-linecap: round;",
+        "  transition: stroke 0.18s ease-out;",
+        "}",
+      );
+    }
+    if (LAMP_VARIANT === "desk") {
+      rules.push(
+        "/* Conical shade of the desk lamp: same translucent glass as the",
+        "   bulb, with a thin lighter linework to read as a defined shape",
+        "   against the dark strip. */",
+        "#" + ROOT_ID + " .dsh-launcher-shade {",
+        "  fill: rgba(255, 255, 255, 0.18);",
+        "  stroke: rgba(255, 255, 255, 0.55);",
+        "  stroke-width: 0.8;",
+        "  stroke-linejoin: round;",
+        "  transition: fill 0.18s ease, stroke 0.18s ease, stroke-width 0.18s ease;",
+        "}",
+        "/* Stem is a single 1px line connecting the shade to the base. */",
+        "#" + ROOT_ID + " .dsh-launcher-stem {",
+        "  stroke: rgba(255, 255, 255, 0.55);",
+        "  stroke-width: 1;",
+        "  stroke-linecap: round;",
+        "  transition: stroke 0.18s ease, stroke-width 0.18s ease;",
+        "}",
+      );
+    }
 
-      /* Pulled: cord + shade travel down together, springing back on
-         release. 3px is proportional to the 38px compact lamp. */
+    // Pulled: cord + body travel down together, springing back on
+    // release. Magnitude is variant-specific: 3px on the compact
+    // 38px desk lamp (proportional to its height), 6px on the taller
+    // 66px pull-string lamp (reads as a real "press" against the
+    // taller chrome).
+    rules.push(
       "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-pulled svg {",
-      "  transform: translateY(3px);",
+      "  transform: translateY(" + PULL_TRANSLATE_PX + ");",
       "}",
-      /* On (click-toggled): the lamp glows. The shade picks up a warm
-         fill + bright warm stroke (lit from inside the bulb), the bulb
-         goes solid warm yellow, the stem + base warm up slightly, and
-         two stacked drop-shadows give the icon a clearly bigger halo
-         than its off-state depth shadow. No blink, no stroke-width
-         jump — just a steady glow that persists until the next click. */
-      "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-shade {",
-      "  fill: rgba(255, 212, 94, 0.32);",
-      "  stroke: rgba(255, 212, 94, 0.85);",
-      "  stroke-width: 1.2;",
-      "}",
-      "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-bulb {",
-      "  fill: #ffd45e;",
-      "  stroke: #ffdf8a;",
-      "  stroke-width: 1.2;",
-      "}",
-      "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-stem {",
-      "  stroke: rgba(255, 212, 94, 0.7);",
-      "  stroke-width: 1.2;",
-      "}",
-      "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-base {",
-      "  fill: rgba(255, 255, 255, 0.55);",
-      "}",
-      "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on svg {",
-      /* Stack: small depth shadow + tight 12px warm glow + wide 24px
-         softer glow. The two warm layers together make the icon's upper
-         half (shade + bulb) read as the light source. */
-      "  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45))",
-      "          drop-shadow(0 0 12px rgba(255, 212, 94, 0.95))",
-      "          drop-shadow(0 0 24px rgba(255, 180, 50, 0.55));",
-      "}",
-      /* Invoke failed (e.g. IPC unavailable): the bulb flashes red instead
-         of staying warm, so a broken pull is visible without devtools. */
+    );
+
+    // On (click-toggled): the lamp glows. The two variants share the
+    // steady on semantics (no blink, no stroke-width jump — just a
+    // persistent glow until the next click) but differ in the surface
+    // they light: the compact desk lamp tints shade + stem + base +
+    // bulb warm and stacks a tight 12px + wide 24px drop-shadow to
+    // read as a real light source from the small icon; the tall
+    // pull-string lamp just lights the bulb and tints its filament
+    // (it's already drawn large enough that one warm halo is enough).
+    if (LAMP_VARIANT === "desk") {
+      rules.push(
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-shade {",
+        "  fill: rgba(255, 212, 94, 0.32);",
+        "  stroke: rgba(255, 212, 94, 0.85);",
+        "  stroke-width: 1.2;",
+        "}",
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-bulb {",
+        "  fill: #ffd45e;",
+        "  stroke: #ffdf8a;",
+        "  stroke-width: 1.2;",
+        "}",
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-stem {",
+        "  stroke: rgba(255, 212, 94, 0.7);",
+        "  stroke-width: 1.2;",
+        "}",
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-base {",
+        "  fill: rgba(255, 255, 255, 0.55);",
+        "}",
+        /* Stack: small depth shadow + tight 12px warm glow + wide 24px
+           softer glow. */
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on svg {",
+        "  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45))",
+        "          drop-shadow(0 0 12px rgba(255, 212, 94, 0.95))",
+        "          drop-shadow(0 0 24px rgba(255, 180, 50, 0.55));",
+        "}",
+      );
+    } else {
+      // Pull-string variant on-state: bulb fills warm, filament
+      // tints orange (the visible glowing element of an Edison bulb),
+      // one drop-shadow halo around the whole SVG.
+      rules.push(
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-bulb {",
+        "  fill: var(--dsh-launcher-lit-fill);",
+        "  stroke: var(--dsh-launcher-lit-stroke);",
+        "}",
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on .dsh-launcher-filament {",
+        "  stroke: #b45309;",
+        "}",
+        "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-on svg {",
+        "  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45))",
+        "          drop-shadow(0 0 10px rgba(255, 212, 94, 0.85));",
+        "}",
+      );
+    }
+
+    // Invoke failed (e.g. IPC unavailable): the bulb flashes red instead
+    // of staying warm, so a broken pull is visible without devtools.
+    rules.push(
       "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-err .dsh-launcher-bulb {",
       "  fill: #ef4444;",
       "  stroke: #f87171;",
@@ -237,18 +309,22 @@
       "#" + ROOT_ID + " .dsh-launcher-btn.dsh-launcher-err svg {",
       "  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45)) drop-shadow(0 0 10px rgba(239, 68, 68, 0.85));",
       "}",
-      /* Light mode (the workbench marks dark with body[data-ds-dark-theme],
-         written by boot-theme.ts before plugin load and kept by
-         ThemePresenter after): amber glass and darker linework keep the
-         bulb legible on the white workbench. The chat page does not set
-         the attribute, so the rule still applies via :not — and it
-         happens to render fine on chat's white surfaces too. Only the
-         palette variables change, so hover/lit precedence stays
-         identical across themes. */
+    );
+
+    // Light mode (the workbench marks dark with body[data-ds-dark-theme],
+    // written by boot-theme.ts before plugin load and kept by
+    // ThemePresenter after): amber glass and darker linework keep the
+    // bulb legible on the white workbench. The chat page does not set
+    // the attribute, so the rule still applies via :not — and it
+    // happens to render fine on chat's white surfaces too. Only the
+    // palette variables change, so hover/lit precedence stays
+    // identical across themes.
+    rules.push(
       "body:not([data-ds-dark-theme]) #" + ROOT_ID + " {",
       "  --dsh-launcher-base-fill: #78716c;",
       "  --dsh-launcher-bulb-fill: rgba(245, 158, 11, 0.24);",
       "  --dsh-launcher-bulb-stroke: #a16207;",
+      "  --dsh-launcher-filament-stroke: #92400e;",
       "  --dsh-launcher-lit-fill: #f59e0b;",
       "  --dsh-launcher-lit-stroke: #92400e;",
       "}",
@@ -256,7 +332,9 @@
       "  0%, 100% { transform: rotate(1.6deg); }",
       "  50% { transform: rotate(-1.6deg); }",
       "}",
-    ].join("\n");
+    );
+
+    return rules.join("\n");
   }
 
   /**
