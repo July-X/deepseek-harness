@@ -503,10 +503,16 @@ main {
   transform: scale(0.96);
 }
 
+/* 官方对话按钮的颜色随其动作语义切换：
+   - chat 未开（label = "打开官方对话"）：Element 文字按钮默认色 = --el-color-primary
+     = #4f8cff = 鲸鱼蓝（品牌主色，open 动作，自然态）。
+   - chat 已开（label = "关闭官方对话"，带 .official-chat-open）：--whale-eye #ff2d30
+     红眼（危险/停止动作语义，与 open 的鲸鱼蓝形成红↔蓝对照；原先用 --good 绿易被
+     误读为「运行中」状态，故改为红眼）。 */
 .el-button.official-chat-open,
 .el-button.official-chat-open:hover,
 .el-button.official-chat-open:focus-visible {
-  color: var(--good);
+  color: var(--whale-eye);
 }
 
 /* 首次运行 / 容错横幅。 */
