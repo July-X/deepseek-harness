@@ -57,9 +57,12 @@
 
   var STYLE_ID = "dsh-titlebar-pulse";
 
-  // Palette lookup by hostname. Anything other than the official chat
-  // gets the Gitea green (the dsh web workbench lives at 127.0.0.1).
-  var isOfficial = window.location.hostname === "chat.deepseek.com";
+  // Palette lookup by hostname. The official-chat content webviews
+  // (DeepSeek, Qianwen, MiniMax) all run in the same dedicated window
+  // and share the official brand blue; anything else (the dsh web
+  // workbench lives at 127.0.0.1) falls through to the Gitea green.
+  var OFFICIAL_HOSTNAMES = ["chat.deepseek.com", "www.qianwen.com", "agent.minimaxi.com"];
+  var isOfficial = OFFICIAL_HOSTNAMES.indexOf(window.location.hostname) !== -1;
   var PALETTE = isOfficial
     ? {
         rgb: "77, 107, 254",

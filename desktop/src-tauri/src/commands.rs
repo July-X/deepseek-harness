@@ -56,8 +56,11 @@ const OFFICIAL_CHAT_DATA_STORE_IDENTIFIER: [u8; 16] = *b"dsh-chat-rel-001";
 /// user-data directory.
 pub const OFFICIAL_CHAT_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AutomationControlled,TranslateUI,InterestFeedContentSuggestions --disable-blink-features=AutomationControlled";
 
-/// Second official-chat tab: the BigModel (智谱) trial center.
-pub const OFFICIAL_CHAT_BIGMODEL_URL: &str = "https://bigmodel.cn/trialcenter/modeltrial/text";
+/// Second official-chat tab: 通义千问 (qianwen).
+pub const OFFICIAL_CHAT_QIANWEN_URL: &str = "https://www.qianwen.com";
+
+/// Third official-chat tab: MiniMax agent.
+pub const OFFICIAL_CHAT_MINIMAX_URL: &str = "https://agent.minimaxi.com";
 
 /// The fixed tabs rendered in the official-chat window's tab strip, in
 /// display order. The first entry is the default active tab on open. Add a
@@ -66,7 +69,8 @@ pub const OFFICIAL_CHAT_BIGMODEL_URL: &str = "https://bigmodel.cn/trialcenter/mo
 /// so no other site is needed for a new tab.
 pub const OFFICIAL_CHAT_TABS: &[(&str, &str)] = &[
     ("DeepSeek", OFFICIAL_CHAT_URL),
-    ("智谱 BigModel", OFFICIAL_CHAT_BIGMODEL_URL),
+    ("千问", OFFICIAL_CHAT_QIANWEN_URL),
+    ("MiniMax", OFFICIAL_CHAT_MINIMAX_URL),
 ];
 
 /// Bare-window label. A `Window` (not a `WebviewWindow`) hosts the strip
@@ -75,9 +79,22 @@ const OFFICIAL_CHAT_WINDOW_LABEL: &str = "official-chat";
 /// Local SPA webview that renders the tab bar (`index.html?chatstrip=1`).
 /// It keeps `window.__TAURI__` — `chat-fingerprint.js` is NOT injected here —
 /// so it can invoke [`official_chat_tabs`] / [`switch_official_chat_tab`].
+/// The pull-string lamp lives here too: it has no separate webview
+/// because the HWND can't be made transparent on this Tauri 2.11 / wry
+/// 0.55.1 stack (a separate webview painted an opaque dark square
+/// regardless of `background_color(Color(0,0,0,0))`), so the lamp is
+/// injected straight into the strip so the whole window has one less
+/// HWND. The strip is 66px tall — 38px for the tabs (natural tab-bar
+/// height) plus 28px so the lamp's 66px SVG fits without clipping.
 const OFFICIAL_CHAT_STRIP_LABEL: &str = "official-chat-strip";
-/// Logical height of the pinned tab strip. Content webviews fill the window
-/// below this offset and are re-laid-out on every window resize.
+/// Logical height of the pinned tab strip. The lamp was redrawn as a
+/// compact 24x38 desk-lamp SVG that fits inside the natural 38px
+/// tab-bar height, so the strip no longer needs to be inflated to host
+/// it. Earlier iterations tried 66px (lamp required 66px to render
+/// without clipping) and a separate launcher HWND (WebView2 child
+/// HWND transparency isn't reliable on this Tauri 2.11 / wry 0.55.1
+/// stack), but neither worked out; the compact 38px SVG is the simplest
+/// and keeps the strip's visual height at the natural tab-bar size.
 const OFFICIAL_CHAT_STRIP_HEIGHT: f64 = 38.0;
 
 /// Shared shell state installed as a Tauri managed state.
@@ -780,7 +797,7 @@ pub fn focus_main_shell(app: AppHandle, x: Option<f64>, y: Option<f64>) -> Resul
 /// webview shares the `<data_dir>/webview-official-chat` user-data folder
 /// (Windows) / [`OFFICIAL_CHAT_DATA_STORE_IDENTIFIER`] (macOS), so cookies,
 /// localStorage, and IndexedDB survive shell restarts. Storage is
-/// origin-scoped by the browser, so the DeepSeek and BigModel tabs do not
+/// origin-scoped by the browser, so the DeepSeek and Qianwen tabs do not
 /// collide even though they share one store. WebView2 also requires
 /// identical environment options per user-data folder; every content
 /// webview passes the same [`OFFICIAL_CHAT_BROWSER_ARGS`], so the
@@ -846,7 +863,6 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
                     let mut builder = WebviewBuilder::new(label, WebviewUrl::External(url))
                         .data_directory(profile_dir.clone())
                         .additional_browser_args(OFFICIAL_CHAT_BROWSER_ARGS)
-                        .initialization_script(include_str!("pullstring-launcher.js"))
                         .initialization_script(include_str!("titlebar-pulse.js"))
                         .initialization_script(include_str!("chat-fingerprint.js"));
                     #[cfg(target_os = "macos")]
@@ -866,14 +882,34 @@ pub async fn open_official_chat(app: AppHandle) -> Result<(), String> {
                     }
                 }
 
-                // Tab strip: local SPA route renders the tab bar and keeps
-                // window.__TAURI__ (chat-fingerprint.js is NOT injected
-                // here) so it can invoke the tab commands. Built last so it
-                // is the topmost child webview.
+                // Tab strip: local SPA route renders the tab bar and
+                // keeps `window.__TAURI__` (chat-fingerprint.js is NOT
+                // injected here) so it can invoke the tab commands. The
+                // pull-string lamp lives in this same webview too — a
+                // separate launcher webview was tried first, but WebView2
+                // child HWNDs can't be made transparent on this Tauri 2.11
+                // stack, which made the launcher render as an opaque dark
+                // square. Keeping the lamp in the strip sidesteps the
+                // platform transparency gap. The strip HWND is fixed to
+                // `--el-bg-color` via `background_color`, the strip SPA's
+                // body uses a matching gradient with `transparent` below
+                // the tabs so the lower 28px of the HWND reads as the same
+                // dark blue (body → HWND fallback), and the lamp's SVG
+                // paints its opaque elements on top — visible as a real
+                // pull-string lamp hanging from the chrome.
                 let strip_builder = WebviewBuilder::new(
                     OFFICIAL_CHAT_STRIP_LABEL,
                     WebviewUrl::App("index.html?chatstrip=1".into()),
-                );
+                )
+                // Lamp is hosted inside this same HWND: a separate launcher
+                // webview was tried first, but WebView2 child HWNDs can't be
+                // made transparent on this Tauri 2.11 / wry 0.55.1 stack, so the
+                // lamp was redrawn as a compact 24x38 desk-lamp that fits the
+                // natural 38px strip height. The strip HWND is opaque (the
+                // default WebView2 white) and the strip SPA's `.chat-strip` paints
+                // its own `--el-bg-color` background, so the launcher doesn't need
+                // any background-color override.
+                .initialization_script(include_str!("pullstring-launcher.js"));
                 window
                     .add_child(
                         strip_builder,

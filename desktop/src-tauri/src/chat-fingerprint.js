@@ -28,8 +28,15 @@
  *    `__TAURI_METADATA__`, `__TAURI_IPC__`). A normal browser shows
  *    nothing there, so page probes must see nothing too — exposing a
  *    Proxy "so typeof checks pass" still announces an embedded webview.
- *    The pull-string lamp captured its own reference earlier in the chain
- *    and keeps working.
+ *    The pull-string lamp lives on the official-chat strip webview
+ *    (label `official-chat-strip`), which a local webview that does not
+ *    run this fingerprint, so it keeps the live bridge untouched. (A
+ *    brief stint on a separate `official-chat-launcher` webview was
+ *    reverted because WebView2 child HWND transparency doesn't work on
+ *    this Tauri 2.11 / wry 0.55.1 stack — the launcher kept painting
+ *    an opaque dark square regardless of the controller's transparent
+ *    DefaultBackgroundColor, so the lamp moved back into the strip
+ *    and the strip grew from 38px to 66px to fit the 66px SVG.)
  *
  * The script is pure JavaScript (no TypeScript) and string-safe — it is
  * `include_str!`-embedded into Rust source at compile time, so any nested

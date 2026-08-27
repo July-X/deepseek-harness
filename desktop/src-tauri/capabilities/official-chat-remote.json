@@ -1,9 +1,9 @@
 {
   "identifier": "official-chat-remote",
-  "description": "The official-chat content webviews are remote origins (DeepSeek chat and the BigModel trial center), so Tauri's ACL denies their invokes by default. Grant only the pull-string launcher's command so the injected lamp on either tab can raise the management panel over the user's cursor. The URLs are intentionally exact (not wildcards) so only those two paths — not the marketing sites or any future sub-app — can drive IPC.",
+  "description": "The official-chat content webviews are remote origins (DeepSeek chat, Qianwen, and MiniMax agent), so Tauri's ACL denies their invokes by default. No shell commands are wired here: the lamp that raises the management panel lives on the local strip webview (see official-chat-strip.json), so the content pages themselves stay read-only as far as the shell is concerned. The URLs are intentionally exact (not wildcards) so only those three origins — not the marketing sites or any future sub-app — can drive IPC.",
   "windows": ["official-chat"],
   "remote": {
-    "urls": ["https://chat.deepseek.com/*", "https://bigmodel.cn/trialcenter/modeltrial/text/*"]
+    "urls": ["https://chat.deepseek.com/*", "https://www.qianwen.com/*", "https://agent.minimaxi.com/*"]
   },
-  "permissions": ["allow-focus-main-shell"]
+  "permissions": []
 }
