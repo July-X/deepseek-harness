@@ -84,8 +84,8 @@ describe('approveEscalation', () => {
   it('a non-widening request fails closed with its own text and never asks', async () => {
     const seen: unknown[] = []
     const spy = ingredients({ approver: approver('allowed-once', r => seen.push(r)) })
-    await expect(approveEscalation(req({ requestedMode: 'read-only' }), spy))
-      .rejects.toThrow(/not strictly wider than this call's current "read-only" mode/)
+    await expect(approveEscalation(req({ requestedMode: 'read-only', effectiveMode: 'workspace-write' }), spy))
+      .rejects.toThrow(/not strictly wider than this call's current "workspace-write" mode/)
     await expect(approveEscalation(req({ requestedMode: 'workspace-write', effectiveMode: 'danger-full-access' as never }), spy))
       .rejects.toThrow(/not strictly wider/)
     expect(seen).toEqual([])
@@ -108,4 +108,17 @@ describe('approveEscalation', () => {
   it('an outcome outside the closed union trips the exhaustiveness guard (defensive)', async () => {
     await expect(approveEscalation(req(), ingredients({ approver: approver('bogus' as never) }))).rejects.toThrow()
   })
+  it.each(['read-only', 'workspace-write', 'danger-full-access'] as const)(
+    'treats a same-mode declaration as no escalation for %s',
+    async (mode) => {
+      const seen: unknown[] = []
+      const granted = await approveEscalation(
+        req({ requestedMode: mode, effectiveMode: mode }),
+        ingredients({ approver: approver('allowed-once', request => seen.push(request)) }),
+      )
+
+      expect(granted).toBe(mode)
+      expect(seen).toEqual([])
+    },
+  )
 })
